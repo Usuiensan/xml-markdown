@@ -11,30 +11,57 @@ import hashlib
 # ==========================================
 
 def fetch_law_data(law_name):
-    """e-Gov APIから法令XMLを取得"""
-    print(f"[{law_name}] を検索中...")
+    """e-Gov API v2から法令XMLを取得"""
+    print(f"[{law_name}] を検索中... (API v2)")
     try:
-        # 1. 法令リストからLawIdを検索
-        list_url = "https://laws.e-gov.go.jp/api/1/lawlists/1"
-        response = requests.get(list_url, timeout=10)
+        # 1. 法令一覧取得API (v2) で法令IDを検索
+        # API v2 endpoint: /laws
+        laws_url = "https://laws.e-gov.go.jp/api/2/laws"
+        params = {
+            "law_title": law_name,
+            "limit": 5  # 候補を少し取得
+        }
+        
+        response = requests.get(laws_url, params=params, timeout=10)
         response.raise_for_status()
-        root = ET.fromstring(response.content)
+        data = response.json()
         
         law_id = None
-        for law in root.findall(".//LawNameListInfo"):
-            if law.find("LawName").text == law_name:
-                law_id = law.find("LawId").text
-                break
-                
+        found_title = ""
+        
+        # 完全一致を優先、なければ部分一致の先頭
+        if data.get("laws"):
+            # 完全一致を探す
+            for law in data["laws"]:
+                info = law.get("law_info", {})
+                revision = law.get("revision_info", {})
+                title = revision.get("law_title", "")
+                if title == law_name:
+                    law_id = info.get("law_id")
+                    found_title = title
+                    break
+            
+            # 完全一致がなければ先頭を採用
+            if not law_id and len(data["laws"]) > 0:
+                law = data["laws"][0]
+                law_id = law["law_info"]["law_id"]
+                found_title = law["revision_info"]["law_title"]
+                print(f"完全一致が見つからないため、'{found_title}' を取得します。")
+
         if not law_id:
             print(f"Error: '{law_name}' が見つかりませんでした。")
             return None
 
-        # 2. 条文データを取得
-        print(f"条文データをダウンロード中... (https://laws.e-gov.go.jp/api/1/lawdata/{law_id})")
-        detail_url = f"https://laws.e-gov.go.jp/api/1/lawdata/{law_id}"
-        law_response = requests.get(detail_url, timeout=30)
+        # 2. 法令本文取得API (v2) でXMLを取得
+        # API v2 endpoint: /law_data/{law_id}
+        # response_format=xml を指定してXMLで取得する
+        print(f"条文データをダウンロード中... (https://laws.e-gov.go.jp/api/2/law_data/{law_id})")
+        data_url = f"https://laws.e-gov.go.jp/api/2/law_data/{law_id}"
+        data_params = {"response_format": "xml"}
+        
+        law_response = requests.get(data_url, params=data_params, timeout=30)
         law_response.raise_for_status()
+        
         return law_response.content
         
     except requests.exceptions.RequestException as e:
@@ -82,18 +109,27 @@ def extract_law_title_from_root(root):
 def extract_law_id_from_root(root):
     """XMLルートから法令ID（可能であればLawId、次にLawNum）を抽出する"""
     try:
+        # API v2 responseの場合、Law要素は law_full_text の下にある
+        target_root = root
+        if root.tag == "law_data_response":
+            full_text = root.find("law_full_text")
+            if full_text is not None:
+                inner_law = full_text.find("Law")
+                if inner_law is not None:
+                    target_root = inner_law
+
         # LawId要素を探す
-        lid = root.find('.//LawId')
+        lid = target_root.find('.//LawId')
         if lid is not None and (lid.text and lid.text.strip()):
             return lid.text.strip()
 
         # LawNum 要素（法令番号）を探す
-        lnum = root.find('.//LawNum')
+        lnum = target_root.find('.//LawNum')
         if lnum is not None and (lnum.text and lnum.text.strip()):
             return lnum.text.strip()
 
         # 代替: Law 要素の属性から作成 (Era+Year+Num)
-        law = root if root.tag == 'Law' else root.find('.//Law')
+        law = target_root if target_root.tag == 'Law' else target_root.find('.//Law')
         if law is not None:
             era = law.get('Era', '')
             year = law.get('Year', '')
@@ -291,6 +327,36 @@ def parse_to_markdown(xml_content, law_name_override=None):
         print(f"XMLパースエラー: {e}")
         return ""
 
+    # --- API v2 ラッパー対応 ---
+    # API v2から取得した場合、ルート要素は 'law_data_response' になっている
+    # その中に 'revision_info' (改正情報) と 'law_full_text' > 'Law' (本文) がある
+    
+    revision_meta = {}
+    
+    if root.tag == "law_data_response":
+        # メタ情報の抽出
+        rev_info = root.find("revision_info")
+        if rev_info is not None:
+            revision_meta['amendment_enforcement_date'] = extract_text(rev_info.find("amendment_enforcement_date"))
+            revision_meta['amendment_law_title'] = extract_text(rev_info.find("amendment_law_title"))
+            revision_meta['amendment_law_num'] = extract_text(rev_info.find("amendment_law_num"))
+            revision_meta['amendment_type'] = extract_text(rev_info.find("amendment_type"))
+            
+        # 本文ルートの差し替え
+        full_text = root.find("law_full_text")
+        if full_text is not None:
+            inner_law = full_text.find("Law")
+            if inner_law is not None:
+                root = inner_law
+            else:
+                # APIの仕様上、law_full_text直下にLawがあるはずだが、念のため
+                print("警告: law_data_response内にLaw要素が見つかりませんでした。")
+        else:
+             print("警告: law_data_response内にlaw_full_text要素が見つかりませんでした。")
+
+
+    # --- 以下、通常の処理 ---
+
     if law_name_override:
         law_name = law_name_override
     else:
@@ -314,7 +380,9 @@ def parse_to_markdown(xml_content, law_name_override=None):
     law_id = extract_law_id_from_root(root)
 
     markdown_text = f"# {law_name}\n\n"
-    markdown_text += extract_law_metadata(root)
+    # メタデータ抽出関数に、APIから取得したRevision情報も渡す
+    markdown_text += extract_law_metadata(root, revision_meta)
+    
     markdown_text += extract_toc(root)
     markdown_text += extract_preamble(root)
     markdown_text += extract_enact_statement(root)
@@ -330,7 +398,7 @@ def parse_to_markdown(xml_content, law_name_override=None):
         for article in main_provision.findall("Article"):
             markdown_text += process_article(article, 4)
             
-        # 【修正】MainProvision直下のParagraph（条がない法令）に対応
+        # MainProvision直下のParagraph（条がない法令）に対応
         direct_paragraphs = main_provision.findall("Paragraph")
         if direct_paragraphs:
             total_p = len(direct_paragraphs)
@@ -767,9 +835,20 @@ def _struct_common(elem, title_tag, mark):
              md += f"{normalize_text(extract_text(sent))}\n\n"
     return md
 
-def extract_law_metadata(root):
+def extract_law_metadata(root, revision_meta=None):
+    """
+    法令のメタデータを抽出する。
+    revision_meta: API v2から取得した改正情報(dict)
+    """
     md = ""
     law = root if root.tag == "Law" else root.find(".//Law")
+    # 可能であれば法令IDを先に抽出してメタに含める
+    try:
+        lid = extract_law_id_from_root(root)
+        if lid:
+            md += f"**法令ID**: {lid}\n\n"
+    except Exception:
+        pass
     if law is not None:
         era = law.get("Era", "")
         year = law.get("Year", "")
@@ -786,7 +865,24 @@ def extract_law_metadata(root):
         pd = law.get("PromulgateDay", "")
         if pm or pd:
             md += f"**公布日**: {pm}月{pd}日\n\n"
+
+        # --- Revision Infoの追記 (API v2使用時) ---
+        if revision_meta:
+            amend_date = revision_meta.get('amendment_enforcement_date')
+            amend_title = revision_meta.get('amendment_law_title')
+            amend_num = revision_meta.get('amendment_law_num')
             
+            if amend_date:
+                md += f"**施行日**: {amend_date}\n\n"
+            
+            if amend_title or amend_num:
+                md += "**最終改正**:\n"
+                if amend_title:
+                    md += f"- 法令名: {amend_title}\n"
+                if amend_num:
+                    md += f"- 番号: {amend_num}\n"
+                md += "\n"
+
         # LawTitleの属性（読み仮名、略称、略称読み）をメタデータに追加
         title_elem = law.find('.//LawTitle')
         if title_elem is not None:
