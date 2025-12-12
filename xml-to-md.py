@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import glob
+import hashlib
 
 # ==========================================
 # ユーティリティ関数
@@ -77,7 +78,7 @@ def extract_law_title_from_root(root):
     except Exception:
         return "名称不明法令"
 
-def save_markdown_file(law_name, md_output, force_overwrite=False):
+def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None):
     """ファイルを保存し、既存ファイルがあれば上書き確認
     force_overwrite=True の場合は確認せずに上書きする
     """
@@ -114,9 +115,45 @@ def save_markdown_file(law_name, md_output, force_overwrite=False):
             f.write(md_output)
         print(f"[保存完了] {filename}")
         return True
-    except IOError as e:
+    except Exception as e:
+        # 上書き確認でキャンセルされた場合はここには来ない
         print(f"ファイルの保存中にエラーが発生しました: {e}")
-        return False
+
+        # 1) 略称が与えられていれば試す
+        if abbrev:
+            safe_abbrev = "".join(c for c in abbrev if c not in '<>:"/\\|?*')
+            if safe_abbrev:
+                try_name = os.path.join(output_dir, f"{safe_abbrev}.md")
+                try:
+                    with open(try_name, "w", encoding="utf-8") as f:
+                        f.write(md_output)
+                    print(f"[保存完了 - 略称使用] {try_name}")
+                    return True
+                except Exception as e2:
+                    print(f"略称での保存に失敗しました: {e2}")
+
+        # 2) それでも失敗したら法令名を切り詰めてハッシュを付与して試す
+        try:
+            hash_suffix = hashlib.sha1(law_name.encode("utf-8")).hexdigest()[:8]
+        except Exception:
+            hash_suffix = "unkn"
+
+        # ベース名の最大長（安全側に短めに設定）
+        max_base_len = 120
+        base = safe_law_name
+        if len(base) > max_base_len:
+            base = base[:max_base_len]
+
+        truncated_name = f"{base}_{hash_suffix}"
+        try_name2 = os.path.join(output_dir, f"{truncated_name}.md")
+        try:
+            with open(try_name2, "w", encoding="utf-8") as f:
+                f.write(md_output)
+            print(f"[保存完了 - 切詰め] {try_name2}")
+            return True
+        except Exception as e3:
+            print(f"切詰め名での保存にも失敗しました: {e3}")
+            return False
 
 # ==========================================
 # テキスト処理・整形関数
@@ -213,6 +250,18 @@ def parse_to_markdown(xml_content, law_name_override=None):
 
     print(f"変換開始: {law_name}")
 
+    # 可能であれば略称を抽出（保存失敗時に使用する）
+    abbrev = ""
+    try:
+        title_elem = root.find('.//LawTitle')
+        if title_elem is not None:
+            raw_abbrev = title_elem.get('Abbrev', '')
+            if raw_abbrev:
+                # カンマ区切りの最初の略称を一次候補とする
+                abbrev = raw_abbrev.split(',')[0].strip()
+    except Exception:
+        abbrev = ""
+
     markdown_text = f"# {law_name}\n\n"
     markdown_text += extract_law_metadata(root)
     markdown_text += extract_toc(root)
@@ -244,7 +293,7 @@ def parse_to_markdown(xml_content, law_name_override=None):
     if law_body is not None:
         markdown_text += process_all_appdx(law_body)
     
-    return markdown_text, law_name
+    return markdown_text, law_name, abbrev
 
 def process_single_paragraph(para, total_p):
     """MainProvision直下のParagraphを処理するヘルパー関数"""
@@ -687,6 +736,35 @@ def extract_law_metadata(root):
         if pm or pd:
             md += f"**公布日**: {pm}月{pd}日\n\n"
             
+        # LawTitleの属性（読み仮名、略称、略称読み）をメタデータに追加
+        title_elem = law.find('.//LawTitle')
+        if title_elem is not None:
+            kana = title_elem.get('Kana', '')
+            abbrev = title_elem.get('Abbrev', '')
+            abbrev_kana = title_elem.get('AbbrevKana', '')
+            
+            if kana:
+                md += f"**読み仮名**: {kana}\n\n"
+            
+            # 略称と読みをカンマで分割してペアで表示
+            if abbrev:
+                abbrevs = abbrev.split(',')
+                # 読みがない場合や数が合わない場合に備える
+                kanas = abbrev_kana.split(',') if abbrev_kana else []
+                
+                md += "**略称**:\n"
+                for i, abbr in enumerate(abbrevs):
+                    # 対応する読みがあればカッコ書きで追加
+                    reading = kanas[i] if i < len(kanas) else ""
+                    if reading:
+                        md += f"- {abbr} ({reading})\n"
+                    else:
+                        md += f"- {abbr}\n"
+                md += "\n"
+            elif abbrev_kana:
+                # 略称がなく読みだけある場合（稀）
+                md += f"**略称（読み）**: {abbrev_kana}\n\n"
+            
     return md
 
 def process_appdx_table(elem): return render_table(elem.find("Table"), 0) if elem.find("Table") is not None else ""
@@ -721,18 +799,18 @@ def process_from_api(law_name, force=False):
     """APIから法令を取得して保存"""
     xml_data = fetch_law_data(law_name)
     if xml_data:
-        md_output, real_law_name = parse_to_markdown(xml_data, law_name)
+        md_output, real_law_name, abbrev = parse_to_markdown(xml_data, law_name)
         if md_output:
-            save_markdown_file(real_law_name, md_output, force_overwrite=force)
+            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev)
 
 def process_from_file(file_path, force=False):
     """ローカルファイルから変換して保存"""
     xml_data = load_xml_from_file(file_path)
     if xml_data:
         # ファイルから読み込むが、法令名はXML内から自動取得する
-        md_output, real_law_name = parse_to_markdown(xml_data)
+        md_output, real_law_name, abbrev = parse_to_markdown(xml_data)
         if md_output:
-            save_markdown_file(real_law_name, md_output, force_overwrite=force)
+            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev)
 
 def process_law_list_file(list_file_path="law_list.txt", force=True):
     """法令リストファイルを読み込んで一括処理"""
@@ -788,18 +866,18 @@ def main():
             print("  1: 法令名を入力して検索（APIを使用）")
             print("  2: XMLファイルのパス、またはフォルダを指定（ローカル）")
             print("  3: 法令リスト(law_list.txt)から一括処理")
-            print("  9: 終了")
+            print("  0: 終了")
             print("="*50)
             
             # 入力待機 (Ctrl+C対応)
-            mode_raw = input("選択してください (1/2/3/9): ").strip()
+            mode_raw = input("選択してください (1/2/3/0): ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n終了します。")
             break
 
         mode = normalize_numeric_input(mode_raw).lower()
         
-        if mode == '9':
+        if mode == '0':
             print("プログラムを終了します。")
             break
         
@@ -846,7 +924,7 @@ def main():
             process_law_list_file(target_list, force=True)
             
         else:
-            print("1, 2, 3, または 9 を入力してください。")
+            print("1, 2, 3, または 0 を入力してください。")
 
 if __name__ == "__main__":
     main()
