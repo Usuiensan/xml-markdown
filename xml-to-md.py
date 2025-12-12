@@ -78,7 +78,34 @@ def extract_law_title_from_root(root):
     except Exception:
         return "名称不明法令"
 
-def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None):
+
+def extract_law_id_from_root(root):
+    """XMLルートから法令ID（可能であればLawId、次にLawNum）を抽出する"""
+    try:
+        # LawId要素を探す
+        lid = root.find('.//LawId')
+        if lid is not None and (lid.text and lid.text.strip()):
+            return lid.text.strip()
+
+        # LawNum 要素（法令番号）を探す
+        lnum = root.find('.//LawNum')
+        if lnum is not None and (lnum.text and lnum.text.strip()):
+            return lnum.text.strip()
+
+        # 代替: Law 要素の属性から作成 (Era+Year+Num)
+        law = root if root.tag == 'Law' else root.find('.//Law')
+        if law is not None:
+            era = law.get('Era', '')
+            year = law.get('Year', '')
+            num = law.get('Num', '')
+            if era and year and num:
+                return f"{era}{year}_{num}"
+
+        return None
+    except Exception:
+        return None
+
+def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None, law_id=None):
     """ファイルを保存し、既存ファイルがあれば上書き確認
     force_overwrite=True の場合は確認せずに上書きする
     """
@@ -131,18 +158,39 @@ def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None):
                     return True
                 except Exception as e2:
                     print(f"略称での保存に失敗しました: {e2}")
-
-        # 2) それでも失敗したら法令名を切り詰めてハッシュを付与して試す
-        try:
-            hash_suffix = hashlib.sha1(law_name.encode("utf-8")).hexdigest()[:8]
-        except Exception:
-            hash_suffix = "unkn"
-
+        # 2) それでも失敗したら、呼び出し側で渡された法令IDがあればそれを使って試す
+        #    (切詰め+ID → IDのみ)。法令IDがない場合はハッシュ方式でフォールバック。
         # ベース名の最大長（安全側に短めに設定）
         max_base_len = 120
         base = safe_law_name
         if len(base) > max_base_len:
             base = base[:max_base_len]
+
+        if law_id:
+            truncated_name_with_id = f"{base}_{law_id}"
+            try_name2 = os.path.join(output_dir, f"{truncated_name_with_id}.md")
+            try:
+                with open(try_name2, "w", encoding="utf-8") as f:
+                    f.write(md_output)
+                print(f"[保存完了 - 切詰め+法令ID] {try_name2}")
+                return True
+            except Exception as e3:
+                print(f"切詰め+法令IDでの保存に失敗しました: {e3}")
+                # 次に法令IDのみで試す
+                try_name3 = os.path.join(output_dir, f"{law_id}.md")
+                try:
+                    with open(try_name3, "w", encoding="utf-8") as f:
+                        f.write(md_output)
+                    print(f"[保存完了 - 法令IDのみ] {try_name3}")
+                    return True
+                except Exception as e4:
+                    print(f"法令IDのみでの保存にも失敗しました: {e4}")
+
+        # 3) 上記すべてに失敗、または法令IDがない場合は従来のハッシュ方式でフォールバック
+        try:
+            hash_suffix = hashlib.sha1(law_name.encode("utf-8")).hexdigest()[:8]
+        except Exception:
+            hash_suffix = "unkn"
 
         truncated_name = f"{base}_{hash_suffix}"
         try_name2 = os.path.join(output_dir, f"{truncated_name}.md")
@@ -151,8 +199,8 @@ def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None):
                 f.write(md_output)
             print(f"[保存完了 - 切詰め] {try_name2}")
             return True
-        except Exception as e3:
-            print(f"切詰め名での保存にも失敗しました: {e3}")
+        except Exception as e5:
+            print(f"切詰め名での保存にも失敗しました: {e5}")
             return False
 
 # ==========================================
@@ -262,6 +310,9 @@ def parse_to_markdown(xml_content, law_name_override=None):
     except Exception:
         abbrev = ""
 
+    # 法令IDを抽出しておく（失敗時のファイル名に使用）
+    law_id = extract_law_id_from_root(root)
+
     markdown_text = f"# {law_name}\n\n"
     markdown_text += extract_law_metadata(root)
     markdown_text += extract_toc(root)
@@ -293,7 +344,7 @@ def parse_to_markdown(xml_content, law_name_override=None):
     if law_body is not None:
         markdown_text += process_all_appdx(law_body)
     
-    return markdown_text, law_name, abbrev
+    return markdown_text, law_name, abbrev, law_id
 
 def process_single_paragraph(para, total_p):
     """MainProvision直下のParagraphを処理するヘルパー関数"""
@@ -799,18 +850,18 @@ def process_from_api(law_name, force=False):
     """APIから法令を取得して保存"""
     xml_data = fetch_law_data(law_name)
     if xml_data:
-        md_output, real_law_name, abbrev = parse_to_markdown(xml_data, law_name)
+        md_output, real_law_name, abbrev, law_id = parse_to_markdown(xml_data, law_name)
         if md_output:
-            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev)
+            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev, law_id=law_id)
 
 def process_from_file(file_path, force=False):
     """ローカルファイルから変換して保存"""
     xml_data = load_xml_from_file(file_path)
     if xml_data:
         # ファイルから読み込むが、法令名はXML内から自動取得する
-        md_output, real_law_name, abbrev = parse_to_markdown(xml_data)
+        md_output, real_law_name, abbrev, law_id = parse_to_markdown(xml_data)
         if md_output:
-            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev)
+            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev, law_id=law_id)
 
 def process_law_list_file(list_file_path="law_list.txt", force=True):
     """法令リストファイルを読み込んで一括処理"""
