@@ -90,7 +90,6 @@ def save_markdown_file(law_name, md_output, force_overwrite=False):
     # 出力ディレクトリが存在しない場合は作成
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        # print(f"出力ディレクトリを作成しました: {output_dir}")
     
     # ファイルパスを出力ディレクトリ内に設定
     filename = os.path.join(output_dir, f"{safe_law_name}.md")
@@ -162,7 +161,7 @@ def extract_text(element):
         # 上付き・下付き・傍線
         elif child.tag in ["Sup", "Sub", "Line", "Column"]:
             text += extract_text(child)
-        # 図・構造要素は無視（別途処理されるためテキストとしては抽出しない）
+        # 図・構造要素は無視
         elif child.tag in ["FigStruct", "Fig", "StyleStruct", "NoteStruct", "FormatStruct", "Class"]:
             pass
         else:
@@ -182,6 +181,7 @@ def convert_article_num(num_str):
     return result
 
 def get_paragraph_label(p_num_attr, total_paragraphs):
+    # 項が1つだけの場合は番号を表示しないことが多い
     if total_paragraphs == 1: return ""
     if not p_num_attr: return ""
     return f"第{p_num_attr}項"
@@ -206,7 +206,6 @@ def parse_to_markdown(xml_content, law_name_override=None):
         print(f"XMLパースエラー: {e}")
         return ""
 
-    # 法令名が指定されていない場合はXML内から取得
     if law_name_override:
         law_name = law_name_override
     else:
@@ -230,16 +229,49 @@ def parse_to_markdown(xml_content, law_name_override=None):
             markdown_text += process_structure_element(section)
         for article in main_provision.findall("Article"):
             markdown_text += process_article(article, 4)
+            
+        # 【修正】MainProvision直下のParagraph（条がない法令）に対応
+        direct_paragraphs = main_provision.findall("Paragraph")
+        if direct_paragraphs:
+            total_p = len(direct_paragraphs)
+            for para in direct_paragraphs:
+                markdown_text += process_single_paragraph(para, total_p)
     
     markdown_text += extract_suppl_provision(root)
     markdown_text += process_amend_provision(root)
     
-    # LawBody直下の別表等を処理
     law_body = root.find(".//LawBody")
     if law_body is not None:
         markdown_text += process_all_appdx(law_body)
     
     return markdown_text, law_name
+
+def process_single_paragraph(para, total_p):
+    """MainProvision直下のParagraphを処理するヘルパー関数"""
+    md = ""
+    p_num = para.get("Num", "")
+    p_label = get_paragraph_label(p_num, total_p)
+    
+    # Sentence処理
+    sent_text = ""
+    para_sent = para.find("ParagraphSentence")
+    target_sent = para_sent.find(".//Sentence") if para_sent is not None else para.find(".//Sentence")
+    if target_sent is not None:
+        sent_text = normalize_text(extract_text(target_sent))
+    
+    if p_label:
+        md += f"**{p_label}** {sent_text}\n\n"
+    else:
+        md += f"{sent_text}\n\n"
+    
+    # Paragraph直下の要素（TableStructなど）
+    md += process_child_elements(para, 0)
+    
+    # Item処理
+    for item in para.findall("Item"):
+        md += process_item(item, 1)
+        
+    return md
 
 def process_all_appdx(parent_element):
     """別表、別記、様式などをまとめて処理"""
@@ -415,6 +447,8 @@ def process_article(article, heading_level):
     
     if total_p > 0:
         for para in paragraphs:
+            # 記事内のパラグラフ処理は既存ロジックを維持しつつ、ヘルパー関数を使う手もあるが
+            # インデントやリスト形式が違う場合があるため、既存コードを維持します。
             p_num = para.get("Num", "")
             p_label = get_paragraph_label(p_num, total_p)
             
@@ -528,8 +562,8 @@ def render_item_sentence(item_sent, indent_level, label, title):
         else: display += f" {definition}"
         md += f"{indent}- {display}\n"
     else:
-        sent = item_sent.find(".//Sentence") # ItemSentence直下とは限らないことがあるため緩和
-        if sent is None: sent = item_sent # フォールバック
+        sent = item_sent.find(".//Sentence") 
+        if sent is None: sent = item_sent 
         text = normalize_text(extract_text(sent))
         md += f"{indent}- **{label}** {text}\n"
         
@@ -568,9 +602,7 @@ def render_table_struct(ts, indent):
     return md
 
 def render_table(table, indent):
-    # 前回の複雑なロジックを維持しつつ、ここでは簡略化して記述します
-    # 実際の運用では前回の render_table 実装をそのまま使用してください
-    # ここではスペース節約のため基本機能のみ記述
+    # Table processing logic
     indent_str = "  " * indent
     md_lines = []
     
@@ -750,15 +782,15 @@ def main():
 
     # 3. 引数がない場合は対話モード
     while True:
-        print("\n" + "="*50)
-        print("処理方法を選択してください:")
-        print("  1: 法令名を入力して検索（APIを使用）")
-        print("  2: XMLファイルのパス、またはフォルダを指定（ローカル）")
-        print("  3: 法令リスト(law_list.txt)から一括処理")
-        print("  9: 終了")
-        print("="*50)
-        
         try:
+            print("\n" + "="*50)
+            print("処理方法を選択してください:")
+            print("  1: 法令名を入力して検索（APIを使用）")
+            print("  2: XMLファイルのパス、またはフォルダを指定（ローカル）")
+            print("  3: 法令リスト(law_list.txt)から一括処理")
+            print("  9: 終了")
+            print("="*50)
+            
             # 入力待機 (Ctrl+C対応)
             mode_raw = input("選択してください (1/2/3/9): ").strip()
         except (EOFError, KeyboardInterrupt):
