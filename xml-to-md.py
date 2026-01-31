@@ -913,7 +913,7 @@ def process_article(article, heading_level):
             md += process_item(item, 1)
 
     for note in article.findall("SupplNote"):
-        md += f"\n*（{normalize_text(extract_text(note))}）*\n"
+        md += f"\n*{normalize_text(extract_text(note))}*\n"
     for arith in article.findall("ArithFormula"):
         md += "\n" + process_arith_formula(arith)
     

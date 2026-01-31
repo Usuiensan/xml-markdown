@@ -161,17 +161,31 @@ table tbody tr:nth-child(even) {
   background-color: #252525;
 }
 
-table tbody tr:hover {
-  background-color: #2d2d2d;
+/* =========================================
+   法令テーブル（分割行の隠蔽）
+   ========================================= */
+
+.writing-mode-horizontal {
+  border-collapse: collapse !important;
 }
 
-/* 縦書きと横書きの指定クラス */
-table.writing-mode-vertical {
-  writing-mode: vertical-rl;
+/* 背景色の縞々を解除して一体感を出す */
+.writing-mode-horizontal tbody tr:nth-child(odd),
+.writing-mode-horizontal tbody tr:nth-child(even) {
+  background-color: #252525;
 }
 
-table.writing-mode-horizontal {
-  writing-mode: horizontal-tb;
+.writing-mode-horizontal td {
+  border: 1px solid #444; /* 基本の枠線 */
+  padding: 4px 12px; /* 左右の余白は維持しつつ、上下を締める */
+  vertical-align: top;
+}
+
+/* インラインの border-style: none を邪魔しないようにする */
+.writing-mode-horizontal td[style*='border-bottom-style: none'],
+.writing-mode-horizontal td[style*='border-top-style: none'] {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 /* テーブル構造体のスタイル */
