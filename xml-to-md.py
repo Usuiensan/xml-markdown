@@ -258,6 +258,103 @@ def process_note_struct(ns): return _struct_common(ns, "NoteStructTitle", "")
 def process_format_struct(fs): return _struct_common(fs, "FormatStructTitle", "**")
 def process_class(cls): return _struct_common(cls, "ClassTitle", "### ")
 
+def build_logical_table_grid(rows):
+    """
+    XMLの行データから論理グリッドを構築
+    
+    rowspan属性を展開し、各セルの状態（テキスト、rowspan、Border属性）を保持する
+    
+    Args:
+        rows: TableRow要素のリスト
+    
+    Returns:
+        grid: 二次元リスト、各要素は {'text': str, 'bt': str, 'bb': str, 'rs': int, 'remaining_rs': int}
+    """
+    if not rows:
+        return []
+    
+    # 最大列数を求める（colspan考慮）
+    max_cols = 0
+    for row in rows:
+        cols = row.findall("TableColumn")
+        col_count = sum(int(col.get('colspan', 1)) for col in cols)
+        max_cols = max(max_cols, col_count)
+    
+    if max_cols == 0:
+        return []
+    
+    grid = []
+    
+    for r_idx, row in enumerate(rows):
+        cols = row.findall("TableColumn")
+        
+        # 現在の行のグリッドを初期化（前の行からのrowspanを考慮）
+        current_grid_row = [None] * max_cols
+        
+        # 前の行からの継続分を埋める（rowspan > 1）
+        if r_idx > 0:
+            for c_idx in range(max_cols):
+                if c_idx < len(grid[r_idx - 1]) and grid[r_idx - 1][c_idx]:
+                    prev_cell = grid[r_idx - 1][c_idx]
+                    if prev_cell.get('remaining_rs', 1) > 1:
+                        # rowspan継続
+                        new_cell = {
+                            'text': '',  # 継続分はテキスト空
+                            'bt': prev_cell.get('bt', 'solid'),
+                            'bb': prev_cell.get('bb', 'solid'),
+                            'rs': prev_cell.get('rs', 1),
+                            'remaining_rs': prev_cell.get('remaining_rs', 1) - 1,
+                            'is_continuation': True
+                        }
+                        current_grid_row[c_idx] = new_cell
+        
+        # 現在の行のセルをグリッドに配置
+        grid_col_idx = 0
+        for col_idx, col in enumerate(cols):
+            # 空きがある列を見つける
+            while grid_col_idx < max_cols and current_grid_row[grid_col_idx] is not None:
+                grid_col_idx += 1
+            
+            if grid_col_idx < max_cols:
+                col_text = normalize_text(extract_text(col))
+                rowspan = int(col.get('rowspan', 1))
+                colspan = int(col.get('colspan', 1))
+                bt = col.get('BorderTop', 'solid')
+                bb = col.get('BorderBottom', 'solid')
+                
+                cell_data = {
+                    'text': col_text,
+                    'bt': bt,
+                    'bb': bb,
+                    'rs': rowspan,
+                    'remaining_rs': rowspan,
+                    'colspan': colspan,
+                    'is_continuation': False
+                }
+                
+                # colspan分のセルを配置
+                for cs_idx in range(colspan):
+                    if grid_col_idx + cs_idx < max_cols:
+                        if cs_idx == 0:
+                            current_grid_row[grid_col_idx + cs_idx] = cell_data
+                        else:
+                            # colspan継続分
+                            current_grid_row[grid_col_idx + cs_idx] = {
+                                'text': '',
+                                'bt': bt,
+                                'bb': bb,
+                                'rs': rowspan,
+                                'remaining_rs': rowspan,
+                                'is_colspan_continuation': True
+                            }
+                
+                grid_col_idx += colspan
+        
+        grid.append(current_grid_row)
+    
+    return grid
+
+
 def calculate_rowspan_from_border(table, row_idx, col_idx, body_rows, cell):
     """
     Border属性からrowspanを自動推測（ハイブリッドモード用）
@@ -316,13 +413,17 @@ def calculate_rowspan_from_border(table, row_idx, col_idx, body_rows, cell):
     return rowspan
 
 def render_table(table, indent):
+    """
+    テーブルをHTMLにレンダリング
+    
+    提供されたプログラム例を参考に、Border属性を考慮した論理的なグリッド処理を実装。
+    見た目上つながっているが論理的には連結されていないセルを正確に処理。
+    """
     indent_str = "  " * indent
     html_lines = []
     
-    # テーブルのWritingMode属性を取得（デフォルト: horizontal-tb）
+    # テーブルのWritingMode属性を取得
     writing_mode = table.get("WritingMode", "horizontal-tb")
-    
-    # CSSクラスを決定
     table_class = 'writing-mode-vertical' if writing_mode == "vertical-rl" else 'writing-mode-horizontal'
     
     html_lines.append(f'{indent_str}<table class="{table_class}">')
@@ -330,10 +431,6 @@ def render_table(table, indent):
     # ヘッダー行処理
     header = table.find("TableHeaderRow")
     body_rows = list(table.findall("TableRow"))
-    
-    # rowspan/colspan追跡用：(行インデックス, 列インデックス) -> (rowspan, colspan)
-    # これにより、各セルが複数行・複数列を占有する場合を追跡
-    rowspan_tracking = {}  
     
     # ヘッダーセルの処理
     if header is not None:
@@ -357,47 +454,61 @@ def render_table(table, indent):
         html_lines.append(f"{indent_str}  </thead>")
         body_rows = body_rows[1:]  # ヘッダーとして使用した行を除外
     
-    # ボディ行処理
+    # ボディ行処理（グリッドベース）
     if body_rows:
-        html_lines.append(f"{indent_str}  <tbody>")
+        # 論理グリッドを構築
+        grid = build_logical_table_grid(body_rows)
         
-        for row_idx, row in enumerate(body_rows):
-            html_lines.append(f"{indent_str}    <tr>")
+        if grid:
+            html_lines.append(f"{indent_str}  <tbody>")
             
-            # 各行のセルを処理するため、XMLに記載されたセルのループ
-            cols = row.findall("TableColumn")
+            # グリッドから見た目上のセルを出力
+            # 注：rowspan継続分や colspan継続分は skip する
+            for r_idx, grid_row in enumerate(grid):
+                html_lines.append(f"{indent_str}    <tr>")
+                
+                for c_idx, cell in enumerate(grid_row):
+                    if cell is None:
+                        continue
+                    
+                    # 継続分（rowspan/colspan）はスキップ
+                    if cell.get('is_continuation') or cell.get('is_colspan_continuation'):
+                        continue
+                    
+                    col_text = cell['text']
+                    rowspan = cell.get('rs', 1)
+                    colspan = cell.get('colspan', 1)
+                    
+                    # セルの属性を生成（Border属性は既に cell に含まれている）
+                    attrs = []
+                    if rowspan > 1:
+                        attrs.append(f'rowspan="{rowspan}"')
+                    if colspan > 1:
+                        attrs.append(f'colspan="{colspan}"')
+                    
+                    # Border スタイルをCSSに変換
+                    style_parts = []
+                    border_map = {
+                        'bt': 'border-top-style',
+                        'bb': 'border-bottom-style'
+                    }
+                    for border_key, css_prop in border_map.items():
+                        border_val = cell.get(border_key, 'solid')
+                        if border_val:
+                            style_parts.append(f"{css_prop}: {border_val}")
+                    
+                    # align/valign 属性は XMLに記載されていないため、セルの内容から推定することは難しいが
+                    # 必要に応じて後で追加可能
+                    
+                    if style_parts:
+                        attrs.append(f'style="{"; ".join(style_parts)}"')
+                    
+                    attrs_str = " " + " ".join(attrs) if attrs else ""
+                    html_lines.append(f'{indent_str}      <td{attrs_str}>{col_text}</td>')
+                
+                html_lines.append(f"{indent_str}    </tr>")
             
-            # この行の出力位置（XMLセルの位置と異なる可能性）
-            output_col_idx = 0
-            for xml_col_idx, col in enumerate(cols):
-                # 出力位置をスキップして、占有されていない列までスキップ
-                while (row_idx, output_col_idx) in rowspan_tracking:
-                    output_col_idx += 1
-                
-                col_text = normalize_text(extract_text(col))
-                colspan = int(col.get("colspan", 1))
-                
-                # ===== モード分岐：rowspan計算 =====
-                if TABLE_PROCESSING_MODE == "hybrid":
-                    rowspan = calculate_rowspan_from_border(table, row_idx, output_col_idx, body_rows, col)
-                else:  # "strict"
-                    rowspan = int(col.get("rowspan", 1))
-                
-                # セルを出力（計算されたrowspanを属性に反映）
-                attrs = get_cell_attributes(col, "td", rowspan_override=rowspan)
-                html_lines.append(f'{indent_str}      <td{attrs}>{col_text}</td>')
-                
-                # rowspan/colspanを追跡：このセルが占有する領域を記録
-                for r in range(row_idx, row_idx + rowspan):
-                    for c in range(output_col_idx, output_col_idx + colspan):
-                        rowspan_tracking[(r, c)] = True
-                
-                # 次のセルの出力位置
-                output_col_idx += colspan
-            
-            html_lines.append(f"{indent_str}    </tr>")
-        
-        html_lines.append(f"{indent_str}  </tbody>")
+            html_lines.append(f"{indent_str}  </tbody>")
     
     html_lines.append(f"{indent_str}</table>")
     
