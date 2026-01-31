@@ -3,68 +3,73 @@
    ========================================= */
 
 /* H1〜H6共通設定 */
-h1, h2, h3, h4, h5, h6 {
-    font-weight: 700;       /* 太字 */
-    margin-top: 1.5em;
-    margin-bottom: 0.8em;
-    line-height: 1.3;
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 700; /* 太字 */
+  margin-top: 1.5em;
+  margin-bottom: 0.8em;
+  line-height: 1.3;
 }
 
 /* body/本文の基本設定 */
 body {
-    background-color: #1f1f1f;
-    color: #fff;
-    font-size: 16px;
-    line-height: 1.8;
+  background-color: #1f1f1f;
+  color: #fff;
+  font-size: 16px;
+  line-height: 1.8;
 }
 
 /* H1 (#) */
 h1 {
-    font-size: 2.0rem;
-    padding-bottom: 0.3em;
-    border-left: 8px solid #4dc4ff;
-    padding-left: 0.5em;
-    color: #bfe4ff;
+  font-size: 2rem;
+  padding-bottom: 0.3em;
+  border-left: 8px solid #4dc4ff;
+  padding-left: 0.5em;
+  color: #bfe4ff;
 }
 
 /* H2 (##): 大区分（黄色） */
 h2 {
-    font-size: 1.75rem;
-    border-left: 7px solid #fff100;   /* 黄色 */
-    padding-left: 0.5em;
-    color: #77d9a8;
+  font-size: 1.75rem;
+  border-left: 7px solid #fff100; /* 黄色 */
+  padding-left: 0.5em;
+  color: #77d9a8;
 }
 
 /* H3 (###): 中区分（緑） */
 h3 {
-    font-size: 1.5rem;
-    border-left: 6px solid #03af7a;   /* 緑 */
-    padding-left: 0.5em;
-    color: #fff;
+  font-size: 1.5rem;
+  border-left: 6px solid #03af7a; /* 緑 */
+  padding-left: 0.5em;
+  color: #fff;
 }
 
 /* H4 (####): 標準区分（空色） */
 h4 {
-    font-size: 1.25rem;
-    border-left: 5px solid #4dc4ff;   /* 空色 */
-    padding-left: 0.5em;
-    color: #fff;
+  font-size: 1.25rem;
+  border-left: 5px solid #4dc4ff; /* 空色 */
+  padding-left: 0.5em;
+  color: #fff;
 }
 
 /* H5 (#####): 小区分（ピンク） */
 h5 {
-    font-size: 1.1rem;
-    border-left: 4px solid #ff8082;   /* ピンク */
-    padding-left: 0.5em;
-    color: #fff;
+  font-size: 1.1rem;
+  border-left: 4px solid #ff8082; /* ピンク */
+  padding-left: 0.5em;
+  color: #fff;
 }
 
 /* H6 (######) */
 h6 {
-    font-size: 1.0rem;
-    border-left: 3px solid #ff4b00; /* 赤 */
-    padding-left: 0.5em;
-    color: #fff;
+  font-size: 1rem;
+  border-left: 3px solid #ff4b00; /* 赤 */
+  padding-left: 0.5em;
+  color: #fff;
 }
 
 /* =========================================
@@ -72,39 +77,130 @@ h6 {
    ========================================= */
 
 .markdown-alert {
-    padding: 1em;
-    border-left: 0.25rem solid;
-    padding-bottom: 0px;
-    padding-top: 0px;
-    border-color: var(--border-color);
-    margin-bottom: 16px; 
+  padding: 1em;
+  border-left: 0.25rem solid;
+  padding-bottom: 0px;
+  padding-top: 0px;
+  border-color: var(--border-color);
+  margin-bottom: 16px;
 }
 
 .markdown-alert > span {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    color: var(--border-color);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  color: var(--border-color);
 }
 
 .markdown-alert .markdown-alert-icon {
-    margin-right: 0.5em;
-    fill: var(--border-color);
+  margin-right: 0.5em;
+  fill: var(--border-color);
 }
 
 /* アラートカラーはそのまま維持 */
-.markdown-alert.note { --border-color: #539BF5; }
-.markdown-alert.warning { --border-color: #C69026; }
-.markdown-alert.important { --border-color: #986EE2; }
-.markdown-alert.caution { --border-color: #E5534B; }
-.markdown-alert.tip { --border-color: #57AB5A; }
+.markdown-alert.note {
+  --border-color: #539bf5;
+}
+.markdown-alert.warning {
+  --border-color: #c69026;
+}
+.markdown-alert.important {
+  --border-color: #986ee2;
+}
+.markdown-alert.caution {
+  --border-color: #e5534b;
+}
+.markdown-alert.tip {
+  --border-color: #57ab5a;
+}
 
 rt {
-    font-size: 0.7em; 
-    line-height: 1;
+  font-size: 0.7em;
+  line-height: 1;
 }
 
 p {
-    line-height: 1.8;
-    margin-bottom: 1em; 
+  line-height: 1.8;
+  margin-bottom: 1em;
+}
+
+/* =========================================
+   テーブルスタイル（HTMLテーブル）
+   ========================================= */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+}
+
+table th,
+table td {
+  padding: 0.8em;
+  text-align: left;
+  border: 1px solid #444;
+}
+
+table thead {
+  background-color: #333;
+}
+
+table thead th {
+  font-weight: bold;
+  color: #4dc4ff;
+  text-align: center;
+}
+
+table tbody tr:nth-child(odd) {
+  background-color: #1f1f1f;
+}
+
+table tbody tr:nth-child(even) {
+  background-color: #252525;
+}
+
+table tbody tr:hover {
+  background-color: #2d2d2d;
+}
+
+/* 縦書きと横書きの指定クラス */
+table.writing-mode-vertical {
+  writing-mode: vertical-rl;
+}
+
+table.writing-mode-horizontal {
+  writing-mode: horizontal-tb;
+}
+
+/* テーブル構造体のスタイル */
+.table-struct {
+  margin: 1.5em 0;
+  padding: 1em;
+  border: 1px solid #444;
+  background-color: #252525;
+}
+
+.table-struct-title {
+  font-weight: bold;
+  font-size: 1.1em;
+  color: #77d9a8;
+  margin-bottom: 1em;
+  padding: 0.5em 0;
+  border-bottom: 2px solid #77d9a8;
+}
+
+/* 備考のスタイル */
+.remarks {
+  margin: 1em 0;
+  padding: 0.8em;
+  background-color: #2a2a2a;
+  border-left: 3px solid #ff8082;
+  font-size: 0.95em;
+  color: #ddd;
+}
+
+.remarks strong {
+  color: #ff8082;
 }

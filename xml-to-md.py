@@ -8,6 +8,17 @@ import hashlib
 from datetime import datetime
 
 # ==========================================
+# テーブル処理設定（グローバル）
+# ==========================================
+# TABLE_PROCESSING_MODE: "hybrid" または "strict"
+#   - "hybrid"  : Border属性からrowspanを自動推測（デフォルト）
+#   - "strict"  : rowspan属性のみ使用、Border属性は無視
+TABLE_PROCESSING_MODE = "hybrid"
+
+# ログ出力設定（トラブル診断用）
+TABLE_ROWSPAN_DEBUG = False
+
+# ==========================================
 # ユーティリティ関数
 # ==========================================
 
@@ -44,12 +55,27 @@ def extract_text(element):
             ruby_text = child.text or ""
             rt = child.find("Rt")
             if rt is not None and rt.text:
-                text += f"{{{ruby_text}|{rt.text}}}"
+                text += f"<ruby>{ruby_text}<rt>{rt.text}</rt></ruby>"
             else:
                 text += ruby_text
-        # 上付き・下付き・傍線
-        elif child.tag in ["Sup", "Sub", "Line", "Column"]:
+        # 傍線（スタイル属性考慮）
+        elif child.tag == "Line":
+            line_style = child.get("Style", "solid")
+            line_text = extract_text(child)
+            if line_style == "dotted":
+                text += f"<u style='text-decoration-style: dotted'>{line_text}</u>"
+            elif line_style == "double":
+                text += f"<u style='text-decoration-style: double'>{line_text}</u>"
+            elif line_style == "none":
+                text += line_text
+            else:  # solid
+                text += f"<u>{line_text}</u>"
+        # 上付き・下付き
+        elif child.tag in ["Sup", "Sub", "Column"]:
             text += extract_text(child)
+        # QuoteStruct（引用構造）を処理
+        elif child.tag == "QuoteStruct":
+            text += process_quote_struct(child)
         # 図・構造要素は無視
         elif child.tag in ["FigStruct", "Fig", "StyleStruct", "NoteStruct", "FormatStruct", "Class"]:
             pass
@@ -81,6 +107,53 @@ def convert_item_num(num_str):
     for part in parts[1:]:
         result += "の" + part
     return result + "号"
+
+def process_quote_struct(quote_elem):
+    """引用構造を処理（Markdown引用ブロックとして表現）"""
+    if quote_elem is None:
+        return ""
+    # QuoteStruct内の全テキストを抽出して引用ブロックとして整形
+    # 複雑な構造の場合は再帰的に処理
+    content = ""
+    for child in quote_elem:
+        if child.tag == "Sentence":
+            # normalize_textを使わずに直接extract_textを呼ぶ（二重正規化を避ける）
+            content += child.text or ""
+            for subchild in child:
+                content += (subchild.text or "") + (subchild.tail or "")
+        else:
+            content += (child.text or "") + (child.tail or "")
+    return f"「{content.strip()}」"
+
+def process_remarks(remarks_elem):
+    """備考を処理"""
+    if remarks_elem is None:
+        return ""
+    md = ""
+    label = remarks_elem.find("RemarksLabel")
+    if label is not None:
+        label_text = normalize_text(extract_text(label))
+        line_break = label.get("LineBreak", "false") == "true"
+        if line_break:
+            md += f" **{label_text} ** \n\n"
+        else:
+            md += f" **{label_text} ** \n"
+    
+    # 備考の項目
+    for item in remarks_elem.findall("Item"):
+        item_num = item.get("Num", "")
+        item_label = convert_item_num(item_num) if item_num else ""
+        item_sent = item.find("ItemSentence")
+        if item_sent is not None:
+            sent_text = normalize_text(extract_text(item_sent))
+            md += f"- {item_label} {sent_text}\n"
+    
+    # 備考の文章
+    for sentence in remarks_elem.findall("Sentence"):
+        sent_text = normalize_text(extract_text(sentence))
+        md += f"{sent_text}\n"
+    
+    return md
 
 # --- LawBody/MainProvision から法令情報を抽出するヘルパー関数 ---
 
@@ -158,6 +231,13 @@ def process_fig_struct(fs):
     title = fs.find("FigStructTitle")
     t_text = normalize_text(extract_text(title)) if title is not None else ""
     md = f"### {t_text}\n\n"
+    
+    # Remarksを処理
+    for remarks in fs.findall("Remarks"):
+        remarks_text = process_remarks(remarks)
+        if remarks_text:
+            md += f"{remarks_text}\n\n"
+    
     fig = fs.find("Fig")
     if fig is not None: md += process_fig(fig)
     return md
@@ -178,45 +258,245 @@ def process_note_struct(ns): return _struct_common(ns, "NoteStructTitle", "")
 def process_format_struct(fs): return _struct_common(fs, "FormatStructTitle", "**")
 def process_class(cls): return _struct_common(cls, "ClassTitle", "### ")
 
+def calculate_rowspan_from_border(table, row_idx, col_idx, body_rows, cell):
+    """
+    Border属性からrowspanを自動推測（ハイブリッドモード用）
+    
+    ロジック:
+    - 明示的なrowspan属性があれば使用
+    - なければBorderBottom="none"で内容ありのセルをチェック
+    - 次行から連続してBorderTop="none"で内容が空のセルが何個続くかカウント
+    - rowspan = 1 + (連続空セル数)
+    """
+    rowspan = int(cell.get('rowspan', 1))
+    
+    if rowspan > 1:
+        # 明示的指定あり → そのまま使用
+        if TABLE_ROWSPAN_DEBUG:
+            print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: rowspan={rowspan} (明示的指定)")
+        return rowspan
+    
+    # rowspan属性なし or rowspan=1の場合、Border属性をチェック
+    border_bottom = cell.get('BorderBottom', 'solid')
+    cell_text = normalize_text(extract_text(cell))
+    
+    if border_bottom == 'none' and cell_text:
+        # 次行以降をスキャン
+        extended_rowspan = 1
+        for next_row_idx in range(row_idx + 1, len(body_rows)):
+            next_row = body_rows[next_row_idx]
+            next_cols = next_row.findall('{*}TableColumn')
+            
+            if col_idx < len(next_cols):
+                next_cell = next_cols[col_idx]
+                next_border_top = next_cell.get('BorderTop', 'solid')
+                next_text = normalize_text(extract_text(next_cell))
+                
+                # BorderTop="none"で内容が空 → 継続してカウント
+                if next_border_top == 'none' and not next_text:
+                    extended_rowspan += 1
+                    if TABLE_ROWSPAN_DEBUG:
+                        print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: 次行{next_row_idx}も占有続行")
+                else:
+                    # パターン終了
+                    if TABLE_ROWSPAN_DEBUG:
+                        print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: Row {next_row_idx}で終了")
+                    break
+            else:
+                break
+        
+        if extended_rowspan > 1:
+            if TABLE_ROWSPAN_DEBUG:
+                print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: rowspan={extended_rowspan} (Border属性から推測)")
+            return extended_rowspan
+    
+    if TABLE_ROWSPAN_DEBUG and border_bottom == 'none' and not cell_text:
+        print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: rowspan=1 (空セル)")
+    
+    return rowspan
+
 def render_table(table, indent):
     indent_str = "  " * indent
-    md_lines = []
+    html_lines = []
     
+    # テーブルのWritingMode属性を取得（デフォルト: horizontal-tb）
+    writing_mode = table.get("WritingMode", "horizontal-tb")
+    
+    # CSSクラスを決定
+    table_class = 'writing-mode-vertical' if writing_mode == "vertical-rl" else 'writing-mode-horizontal'
+    
+    html_lines.append(f'{indent_str}<table class="{table_class}">')
+    
+    # ヘッダー行処理
     header = table.find("TableHeaderRow")
-    rows = table.findall("TableRow")
+    body_rows = list(table.findall("TableRow"))
     
-    def get_cols(row):
-        return [normalize_text(extract_text(c)) for c in row.findall("TableColumn") or row.findall("TableHeaderColumn")]
+    # rowspan/colspan追跡用：(行インデックス, 列インデックス) -> (rowspan, colspan)
+    # これにより、各セルが複数行・複数列を占有する場合を追跡
+    rowspan_tracking = {}  
+    
+    # ヘッダーセルの処理
+    if header is not None:
+        html_lines.append(f"{indent_str}  <thead>")
+        html_lines.append(f"{indent_str}    <tr>")
+        for header_col in header.findall("TableHeaderColumn"):
+            col_text = normalize_text(extract_text(header_col))
+            attrs = get_cell_attributes(header_col, "th")
+            html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
+        html_lines.append(f"{indent_str}    </tr>")
+        html_lines.append(f"{indent_str}  </thead>")
+    elif body_rows:
+        # TableHeaderRowが存在しない場合、最初のTableRowをヘッダーとして使用
+        html_lines.append(f"{indent_str}  <thead>")
+        html_lines.append(f"{indent_str}    <tr>")
+        for col in body_rows[0].findall("TableColumn"):
+            col_text = normalize_text(extract_text(col))
+            attrs = get_cell_attributes(col, "th")
+            html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
+        html_lines.append(f"{indent_str}    </tr>")
+        html_lines.append(f"{indent_str}  </thead>")
+        body_rows = body_rows[1:]  # ヘッダーとして使用した行を除外
+    
+    # ボディ行処理
+    if body_rows:
+        html_lines.append(f"{indent_str}  <tbody>")
+        
+        for row_idx, row in enumerate(body_rows):
+            html_lines.append(f"{indent_str}    <tr>")
+            
+            # 各行のセルを処理するため、XMLに記載されたセルのループ
+            cols = row.findall("TableColumn")
+            
+            # この行の出力位置（XMLセルの位置と異なる可能性）
+            output_col_idx = 0
+            for xml_col_idx, col in enumerate(cols):
+                # 出力位置をスキップして、占有されていない列までスキップ
+                while (row_idx, output_col_idx) in rowspan_tracking:
+                    output_col_idx += 1
+                
+                col_text = normalize_text(extract_text(col))
+                colspan = int(col.get("colspan", 1))
+                
+                # ===== モード分岐：rowspan計算 =====
+                if TABLE_PROCESSING_MODE == "hybrid":
+                    rowspan = calculate_rowspan_from_border(table, row_idx, output_col_idx, body_rows, col)
+                else:  # "strict"
+                    rowspan = int(col.get("rowspan", 1))
+                
+                # セルを出力（計算されたrowspanを属性に反映）
+                attrs = get_cell_attributes(col, "td", rowspan_override=rowspan)
+                html_lines.append(f'{indent_str}      <td{attrs}>{col_text}</td>')
+                
+                # rowspan/colspanを追跡：このセルが占有する領域を記録
+                for r in range(row_idx, row_idx + rowspan):
+                    for c in range(output_col_idx, output_col_idx + colspan):
+                        rowspan_tracking[(r, c)] = True
+                
+                # 次のセルの出力位置
+                output_col_idx += colspan
+            
+            html_lines.append(f"{indent_str}    </tr>")
+        
+        html_lines.append(f"{indent_str}  </tbody>")
+    
+    html_lines.append(f"{indent_str}</table>")
+    
+    return "\n".join(html_lines) + "\n\n"
 
-    h_cols = get_cols(header) if header is not None else []
+def get_cell_attributes(cell, cell_type="td", rowspan_override=None):
+    """テーブルセルの属性をHTMLのstyle属性に変換
     
-    max_cols = len(h_cols)
-    grid = []
-    for r in rows:
-        c = get_cols(r)
-        max_cols = max(max_cols, len(c))
-        grid.append(c)
-        
-    if not h_cols and grid: h_cols = grid.pop(0) 
+    枠線のBorder属性を CSS border-*-style に変換することで、
+    論理的には連結されていないが見た目上つながっているセルの意図を保つ。
     
-    h_cols += [""] * (max_cols - len(h_cols))
+    Args:
+        cell: XML要素
+        cell_type: "td" または "th"
+        rowspan_override: 計算されたrowspan値（指定時はXML属性を上書き）
+    """
+    attrs = []
     
-    md_lines.append(indent_str + "| " + " | ".join(h_cols) + " |")
-    md_lines.append(indent_str + "| " + " | ".join(["---"]*max_cols) + " |")
+    # rowspan、colspan
+    # rowspan_overrideが指定されていれば、それを優先（ハイブリッドモード用）
+    if rowspan_override is not None:
+        rowspan = str(rowspan_override)
+    else:
+        rowspan = cell.get("rowspan")
     
-    for row in grid:
-        row += [""] * (max_cols - len(row))
-        md_lines.append(indent_str + "| " + " | ".join(row) + " |")
-        
-    return "\n".join(md_lines) + "\n\n"
+    colspan = cell.get("colspan")
+    
+    if rowspan:
+        attrs.append(f'rowspan="{rowspan}"')
+    if colspan:
+        attrs.append(f'colspan="{colspan}"')
+    
+    # テキスト配置（Align）
+    align = cell.get("Align")
+    valign = cell.get("Valign")
+    
+    style_parts = []
+    
+    # 枠線スタイル（Border属性をCSS border-*-styleに変換）
+    border_map = {
+        "BorderTop": "border-top-style",
+        "BorderBottom": "border-bottom-style",
+        "BorderLeft": "border-left-style",
+        "BorderRight": "border-right-style"
+    }
+    
+    for border_attr, css_prop in border_map.items():
+        border_value = cell.get(border_attr)
+        if border_value:
+            # solid, none, dotted, double をそのままCSS値として使用
+            style_parts.append(f"{css_prop}: {border_value}")
+    
+    # テキスト配置
+    if align:
+        if align == "left":
+            style_parts.append("text-align: left")
+        elif align == "center":
+            style_parts.append("text-align: center")
+        elif align == "right":
+            style_parts.append("text-align: right")
+        elif align == "justify":
+            style_parts.append("text-align: justify")
+    
+    if valign:
+        if valign == "top":
+            style_parts.append("vertical-align: top")
+        elif valign == "middle":
+            style_parts.append("vertical-align: middle")
+        elif valign == "bottom":
+            style_parts.append("vertical-align: bottom")
+    
+    if style_parts:
+        attrs.append(f'style="{"; ".join(style_parts)}"')
+    
+    if attrs:
+        return " " + " ".join(attrs)
+    return ""
 
 def render_table_struct(ts, indent):
-    md = ""
+    html = ""
+    indent_str = "  " * indent
     title = ts.find("TableStructTitle")
-    if title is not None: md += f"{'  '*indent}{normalize_text(extract_text(title))}\n"
+    if title is not None: 
+        title_text = normalize_text(extract_text(title))
+        html += f"{indent_str}<div class=\"table-struct\">\n"
+        html += f"{indent_str}  <div class=\"table-struct-title\">{title_text}</div>\n"
+    
+    # Remarksを処理
+    for remarks in ts.findall("Remarks"):
+        remarks_text = process_remarks(remarks)
+        if remarks_text:
+            html += f"{indent_str}  {remarks_text}\n"
+    
     tbl = ts.find("Table")
-    if tbl is not None: md += render_table(tbl, indent)
-    return md
+    if tbl is not None:
+        html += render_table(tbl, indent + 1)
+    if title is not None:
+        html += f"{indent_str}</div>\n"
+    return html
 
 def process_list(list_elem, indent_level):
     md = ""
@@ -348,6 +628,13 @@ def _appdx_common(elem):
         if "Title" in child.tag:
             md += f"## {normalize_text(extract_text(child))}\n\n"
             break
+    
+    # RelatedArticleNum（関係条文番号）を処理
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    
     for p in elem.findall("Paragraph"):
         s = p.find(".//Sentence")
         if s is not None: md += f"{normalize_text(extract_text(s))}\n\n"
@@ -355,9 +642,54 @@ def _appdx_common(elem):
     for t in elem.findall("Table"): md += render_table(t, 0)
     for ss in elem.findall("StyleStruct"): md += process_style_struct(ss)
     for fs in elem.findall("FormatStruct"): md += process_format_struct(fs)
+    for ns in elem.findall("NoteStruct"): md += process_note_struct(ns)
+    for fig_s in elem.findall("FigStruct"): md += process_fig_struct(fig_s)
+    
+    # Remarksを処理
+    for remarks in elem.findall("Remarks"):
+        remarks_text = process_remarks(remarks)
+        if remarks_text:
+            md += f"{remarks_text}\n\n"
+    
+    # Item（項目）を処理
+    for item in elem.findall("Item"):
+        md += process_item(item, 0)
+    
     return md
 
-def process_appdx_table(elem): return render_table(elem.find("Table"), 0) if elem.find("Table") is not None else ""
+def process_appdx_table(elem): 
+    """別表を処理"""
+    md = ""
+    # AppdxTableTitleを処理
+    title = elem.find("AppdxTableTitle")
+    if title is not None:
+        md += f"## {normalize_text(extract_text(title))}\n\n"
+    
+    # RelatedArticleNum（関係条文番号）を処理
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    
+    # TableStructを処理
+    for ts in elem.findall("TableStruct"): 
+        md += render_table_struct(ts, 0)
+    
+    # 直接のTableを処理
+    for t in elem.findall("Table"): 
+        md += render_table(t, 0)
+    
+    # Remarksを処理
+    for remarks in elem.findall("Remarks"):
+        remarks_text = process_remarks(remarks)
+        if remarks_text:
+            md += f"{remarks_text}\n\n"
+    
+    # Item（項目）を処理
+    for item in elem.findall("Item"):
+        md += process_item(item, 0)
+    
+    return md
 def process_appdx_note(elem): return _appdx_common(elem)
 def process_appdx_style(elem): return _appdx_common(elem)
 def process_appdx_format(elem): return _appdx_common(elem)
@@ -596,19 +928,134 @@ def extract_suppl_provision(xml_root):
 def process_all_appdx(parent_element):
     """別表、別記、様式などをまとめて処理"""
     md = ""
-    for appdx_table in parent_element.findall("AppdxTable"):
-        md += "# 別表\n\n" + process_appdx_table(appdx_table)
-    for appdx_note in parent_element.findall("AppdxNote"):
-        md += "# 別記\n\n" + process_appdx_note(appdx_note)
-    for appdx_style in parent_element.findall("AppdxStyle"):
-        md += "# 様式\n\n" + process_appdx_style(appdx_style)
-    for appdx_format in parent_element.findall("AppdxFormat"):
-        md += "# 書式\n\n" + process_appdx_format(appdx_format)
-    for appdx_fig in parent_element.findall("AppdxFig"):
-        md += "# 別図\n\n" + process_appdx_fig(appdx_fig)
-    for appdx in parent_element.findall("Appdx"):
-        md += "# 別\n\n" + process_appdx(appdx)
+    appdx_tables = parent_element.findall("AppdxTable")
+    if appdx_tables:
+        md += "# 別表\n\n"
+        for appdx_table in appdx_tables:
+            md += process_appdx_table(appdx_table)
+    
+    appdx_notes = parent_element.findall("AppdxNote")
+    if appdx_notes:
+        md += "# 別記\n\n"
+        for appdx_note in appdx_notes:
+            md += process_appdx_note(appdx_note)
+    
+    appdx_styles = parent_element.findall("AppdxStyle")
+    if appdx_styles:
+        md += "# 様式\n\n"
+        for appdx_style in appdx_styles:
+            md += process_appdx_style(appdx_style)
+    
+    appdx_formats = parent_element.findall("AppdxFormat")
+    if appdx_formats:
+        md += "# 書式\n\n"
+        for appdx_format in appdx_formats:
+            md += process_appdx_format(appdx_format)
+    
+    appdx_figs = parent_element.findall("AppdxFig")
+    if appdx_figs:
+        md += "# 別図\n\n"
+        for appdx_fig in appdx_figs:
+            md += process_appdx_fig(appdx_fig)
+    
+    appdxs = parent_element.findall("Appdx")
+    if appdxs:
+        md += "# 別\n\n"
+        for appdx in appdxs:
+            md += process_appdx(appdx)
+    
     return md
+
+def get_table_css_style():
+    """テーブル用のCSSスタイルを返す
+    
+    HTML表の枠線スタイルを正確に表現するためのCSS。
+    border-*-style属性で見た目上つながっているが論理的には連結されていない
+    セルの意図を保つ。
+    """
+    return """<style>
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+}
+
+table td, table th {
+  border: 1px solid black;
+  padding: 8px;
+  text-align: left;
+}
+
+/* Border style attributes */
+td, th {
+  border-width: 1px;
+  border-color: black;
+}
+
+/* border-*-style で none を指定したセルは枠線を非表示にする */
+td[style*="border-top-style: none"], 
+th[style*="border-top-style: none"] {
+  border-top: none;
+}
+
+td[style*="border-bottom-style: none"], 
+th[style*="border-bottom-style: none"] {
+  border-bottom: none;
+}
+
+td[style*="border-left-style: none"], 
+th[style*="border-left-style: none"] {
+  border-left: none;
+}
+
+td[style*="border-right-style: none"], 
+th[style*="border-right-style: none"] {
+  border-right: none;
+}
+
+/* dotted スタイルを指定したセル */
+td[style*="border-top-style: dotted"], 
+th[style*="border-top-style: dotted"] {
+  border-top-style: dotted;
+}
+
+td[style*="border-bottom-style: dotted"], 
+th[style*="border-bottom-style: dotted"] {
+  border-bottom-style: dotted;
+}
+
+td[style*="border-left-style: dotted"], 
+th[style*="border-left-style: dotted"] {
+  border-left-style: dotted;
+}
+
+td[style*="border-right-style: dotted"], 
+th[style*="border-right-style: dotted"] {
+  border-right-style: dotted;
+}
+
+/* double スタイルを指定したセル */
+td[style*="border-top-style: double"], 
+th[style*="border-top-style: double"] {
+  border-top-style: double;
+}
+
+td[style*="border-bottom-style: double"], 
+th[style*="border-bottom-style: double"] {
+  border-bottom-style: double;
+}
+
+td[style*="border-left-style: double"], 
+th[style*="border-left-style: double"] {
+  border-left-style: double;
+}
+
+td[style*="border-right-style: double"], 
+th[style*="border-right-style: double"] {
+  border-right-style: double;
+}
+</style>
+"""
 
 def extract_law_metadata(root, revision_meta=None):
     """
@@ -681,7 +1128,7 @@ def extract_law_metadata(root, revision_meta=None):
                         md += f"- {abbr}\n"
                 md += "\n"
             elif abbrev_kana:
-                md += f"**略称（読み）**: {abbrev_kana}\n\n"
+                md += f"**略称（読み）※頭文字のみの場合あり**: {abbrev_kana}\n\n"
             
     return md
 
@@ -740,6 +1187,9 @@ def parse_to_markdown(xml_content, law_name_override=None):
     law_id = extract_law_id_from_root(root)
 
     markdown_text = f"# {law_name}\n\n"
+    # CSS スタイルを先頭に追加（テーブルの枠線表示用）
+    markdown_text += get_table_css_style()
+    markdown_text += "\n"
     markdown_text += extract_law_metadata(root, revision_meta)
     
     markdown_text += extract_toc(root)
@@ -951,8 +1401,20 @@ def main():
     parser.add_argument("--law", help="法令名を指定してAPIから取得・変換します (確認なしで上書き)")
     parser.add_argument("--list", nargs="?", const="law_list.txt", help="法令リストファイルを指定して一括処理します (デフォルト: law_list.txt)")
     parser.add_argument("--asof", help="--law または --list 使用時に適用する法令の時点(YYYY-MM-DD)")
+    parser.add_argument("--table-mode", choices=["hybrid", "strict"], default="hybrid", 
+                        help="テーブル処理モード: hybrid(Border属性から推測) または strict(rowspan属性のみ) [デフォルト: hybrid]")
+    parser.add_argument("--table-debug", action="store_true", help="テーブルrowspan計算のデバッグログを出力")
     
     args = parser.parse_args()
+    
+    # グローバル変数を引数から設定
+    global TABLE_PROCESSING_MODE, TABLE_ROWSPAN_DEBUG
+    TABLE_PROCESSING_MODE = args.table_mode
+    TABLE_ROWSPAN_DEBUG = args.table_debug
+    
+    if TABLE_ROWSPAN_DEBUG:
+        print(f"[デバッグ] TABLE_PROCESSING_MODE={TABLE_PROCESSING_MODE}")
+        print(f"[デバッグ] TABLE_ROWSPAN_DEBUG=True")
 
     if args.law:
         process_from_api(args.law, force=True, asof_date=args.asof)
