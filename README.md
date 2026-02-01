@@ -324,16 +324,19 @@ options:
 ```
 
 **特徴:**
+
 - `border-top: 1px solid black` → 枠線あり（solid）
 - `border-bottom: none` → 枠線なし（見た目の結合を表現）
 - `border-left`, `border-right`: 左右の枠線も同様に制御
 
 **ハイブリッドモード（デフォルト）:**
+
 - 明示的な `rowspan` 属性がある場合はそれを優先使用
 - ない場合、Border属性（特に `BorderBottom="none"`）から rowspan を自動推測
 - コマンドライン: `--table-mode hybrid` （デフォルト）
 
 **ストリクトモード:**
+
 - Border属性を無視し、明示的な `rowspan` 属性のみ使用
 - コマンドライン: `--table-mode strict`
 
@@ -346,6 +349,7 @@ options:
 3. **HTMLの複雑さ**: 罫線のCSSスタイルが多数含まれ、読み取り対象の情報が分散
 
 **推奨:**
+
 - 表の内容を自動処理する場合、元のXML構造（rowspan属性）を参考にしてください
 - LLMに表を読み込ませる際は、「表の構造は罫線で表現されている」という前提を明示してください
 
@@ -373,11 +377,11 @@ options:
 
 **現在の実装状況:**
 
-| 項目 | 状態 | 説明 |
-|------|------|------|
-| 罫線検出関数 | ✅ 実装済 | `_check_table_has_non_solid_border()` が定義 |
-| 制御フラグ | ✅ 実装済 | `enable_border_style` パラメータが定義 |
-| 統合処理 | ⏳ 検討中 | `render_table()` からのフラグ渡し、テストが必要 |
+| 項目         | 状態      | 説明                                            |
+| ------------ | --------- | ----------------------------------------------- |
+| 罫線検出関数 | ✅ 実装済 | `_check_table_has_non_solid_border()` が定義    |
+| 制御フラグ   | ✅ 実装済 | `enable_border_style` パラメータが定義          |
+| 統合処理     | ⏳ 検討中 | `render_table()` からのフラグ渡し、テストが必要 |
 
 **削減効果:**
 
@@ -388,7 +392,11 @@ options:
 
 ```html
 <!-- 削減前：全セルが solid border -->
-<td style="border-top-style: solid; border-bottom-style: solid; border-left-style: solid; border-right-style: solid;">テキスト</td>
+<td
+  style="border-top-style: solid; border-bottom-style: solid; border-left-style: solid; border-right-style: solid;"
+>
+  テキスト
+</td>
 
 <!-- 削減後：罫線情報削除 -->
 <td>テキスト</td>
@@ -534,7 +542,8 @@ python -m pip install requests
    - 複数セクションから成る表は、セクションごとに分けてから処理する
    - 行や列ごとに簡潔なテキスト説明を追加する
 
-**参考:** 
+**参考:**
+
 - 詳細は「テーブルの罫線（Border）について」セクションを参照
 - トークン削減戦略は「表の罫線情報の最適化（トークン削減戦略）」セクションを参照
 
