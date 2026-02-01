@@ -20,8 +20,6 @@ TABLE_ROWSPAN_DEBUG = False
 
 # 画像ダウンロード設定
 DOWNLOAD_IMAGES = True  # 画像を自動ダウンロードするかどうか
-CURRENT_LAW_REVISION_ID = None  # 現在処理中の法令履歴ID
-CURRENT_IMAGE_DIR = None  # 現在の画像保存ディレクトリ
 
 # ==========================================
 # ユーティリティ関数
@@ -55,8 +53,8 @@ def download_image_from_api(law_revision_id, src_attr, image_dir):
         print(f"[画像] 既存: {filename}")
         return os.path.join(os.path.basename(image_dir), filename)
     
-    # APIエンドポイント
-    api_url = f"https://laws.e-gov.go.jp/api/2/laws/{law_revision_id}/attachments"
+    # APIエンドポイント（修正版）
+    api_url = f"https://laws.e-gov.go.jp/api/2/attachment/{law_revision_id}"
     params = {"src": src_attr}
     
     try:
@@ -165,7 +163,7 @@ def convert_item_num(num_str):
         result += "の" + part
     return result + "号"
 
-def process_table_column_content(col_elem):
+def process_table_column_content(col_elem, law_revision_id=None, image_dir=None):
     """TableColumn内の構造要素を処理してHTMLセル内容を生成
     
     TableColumnには <Sentence>, <Item>, <Paragraph>, <Column> などの構造要素が
@@ -174,6 +172,11 @@ def process_table_column_content(col_elem):
     スキーマ上の可能な子要素:
     <Part> | <Chapter> | <Section> | <Subsection> | <Division> | <Article> | 
     <Paragraph> | <Item> | <Subitem1-10> | <FigStruct> | <Remarks> | <Sentence> | <Column>
+    
+    Args:
+        col_elem: TableColumn要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
     
     Returns:
         str: HTMLセル内容（改行を<br>タグで表現）
@@ -230,10 +233,10 @@ def process_table_column_content(col_elem):
                 parts.append(remarks_text)
         
         elif tag == "FigStruct":
-            # 図の処理
+            # 図の処理（HTMLテーブル内なので is_in_table=True）
             fig = child.find("Fig")
             if fig is not None:
-                fig_text = process_fig(fig)
+                fig_text = process_fig(fig, law_revision_id, image_dir, is_in_table=True)
                 if fig_text:
                     parts.append(fig_text.strip())
         
@@ -355,7 +358,7 @@ def process_remarks(remarks_elem):
         if line_break:
             md += f"**{label_text}**\n\n"
         else:
-            md += f"**{label_text}**\n"
+            md += f"**{label_text}**\n\n"
     
     # 備考の項目
     for item in remarks_elem.findall("Item"):
@@ -364,7 +367,7 @@ def process_remarks(remarks_elem):
         item_sent = item.find("ItemSentence")
         if item_sent is not None:
             sent_text = normalize_text(extract_text(item_sent))
-            md += f"- {item_label} {sent_text}\n"
+            md += f"- {item_label}\n{sent_text}\n"
     
     # 備考の文章
     for sentence in remarks_elem.findall("Sentence"):
@@ -431,17 +434,22 @@ def extract_law_id_from_root(root):
 # NOTE: これらの関数は、メインの parse_to_markdown や他の処理関数から呼び出されます。
 
 def process_arith_formula(arith_formula):
-    """算式を処理（Num属性とテキスト）"""
+    """算式を処理（Num属性とテキスト、改行を保持）
+    
+    normalize_text()を使用すると改行が失われ計算式が崩壊するため、
+    extract_text()のみを使用して改行を保持する。
+    """
     if arith_formula is None: return ""
     
-    formula_text = normalize_text(extract_text(arith_formula))
+    # 改行を保持するためnormalize_text()は使わない
+    formula_text = extract_text(arith_formula)
     if not formula_text: return ""
     
     # Num属性（算式番号）を取得
     formula_num = arith_formula.get("Num", "")
     num_label = f"（式{formula_num}）" if formula_num else ""
     
-    # 複数行または長い式の場合はコードブロック、短い式はインライン
+    # 改行を含む算式は常にコードブロックで表示
     if "\n" in formula_text or len(formula_text) > 100:
         return f"{num_label}\n```\n{formula_text}\n```\n\n"
     else:
@@ -454,10 +462,16 @@ def process_arith_formula_num(arith_formula_num):
     if not text: return ""
     return f"**{text}**\n\n"
 
-def process_fig(fig):
+def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
     """図を処理（src属性で画像参照、またはテキスト説明）
     
     画像が含まれる場合、e-Gov APIから自動的にダウンロードして保存します。
+    
+    Args:
+        fig: Fig要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
+        is_in_table: HTMLテーブル内かどうか（Trueの場合は<img>タグを使用）
     """
     if fig is None: return ""
     
@@ -466,23 +480,33 @@ def process_fig(fig):
     
     if src:
         # 画像をダウンロード（DOWNLOAD_IMAGES=Trueの場合）
-        if DOWNLOAD_IMAGES and CURRENT_LAW_REVISION_ID and CURRENT_IMAGE_DIR:
+        if DOWNLOAD_IMAGES and law_revision_id and image_dir:
             local_path = download_image_from_api(
-                CURRENT_LAW_REVISION_ID,
+                law_revision_id,
                 src,
-                CURRENT_IMAGE_DIR
+                image_dir
             )
             
             if local_path:
                 # ダウンロード成功 - ローカルパスを使用
-                return f"![{alt}]({local_path})\n\n"
+                if is_in_table:
+                    # HTMLテーブル内では<img>タグを使用
+                    return f'<img src="{local_path}" alt="{alt}" />'
+                else:
+                    return f"![{alt}]({local_path})\n\n"
             else:
                 # ダウンロード失敗 - 元のパスを使用（警告付き）
                 print(f"[警告] 画像参照: {src} (ダウンロード失敗、元のパスを使用)")
-                return f"![{alt}]({src})\n\n"
+                if is_in_table:
+                    return f'<img src="{src}" alt="{alt}" />'
+                else:
+                    return f"![{alt}]({src})\n\n"
         else:
             # 画像ダウンロードが無効、または必要な情報がない場合
-            return f"![{alt}]({src})\n\n"
+            if is_in_table:
+                return f'<img src="{src}" alt="{alt}" />'
+            else:
+                return f"![{alt}]({src})\n\n"
     elif alt:
         # src がない場合は説明テキストとして出力
         return f"*[図: {alt}]*\n\n"
@@ -493,7 +517,7 @@ def process_fig(fig):
 def process_fig_struct(fs):
     title = fs.find("FigStructTitle")
     t_text = normalize_text(extract_text(title)) if title is not None else ""
-    md = f"### {t_text}\n\n"
+    md = f" **{t_text}** \n\n"
     
     # Remarksを処理
     for remarks in fs.findall("Remarks"):
@@ -521,7 +545,7 @@ def process_note_struct(ns): return _struct_common(ns, "NoteStructTitle", "")
 def process_format_struct(fs): return _struct_common(fs, "FormatStructTitle", "**")
 def process_class(cls): return _struct_common(cls, "ClassTitle", "### ")
 
-def build_logical_table_grid(rows):
+def build_logical_table_grid(rows, law_revision_id=None, image_dir=None):
     """
     XMLの行データから論理グリッドを構築
     
@@ -529,6 +553,8 @@ def build_logical_table_grid(rows):
     
     Args:
         rows: TableRow要素のリスト
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
     
     Returns:
         grid: 二次元リスト、各要素は {'text': str, 'bt': str, 'bb': str, 'rs': int, 'remaining_rs': int}
@@ -579,8 +605,8 @@ def build_logical_table_grid(rows):
                 grid_col_idx += 1
             
             if grid_col_idx < max_cols:
-                # ✨ 改善: TableColumn内の構造要素を処理
-                col_text = process_table_column_content(col)
+                # ✨ 改善: TableColumn内の構造要素を処理（画像パラメータも渡す）
+                col_text = process_table_column_content(col, law_revision_id, image_dir)
                 rowspan = int(col.get('rowspan', 1))
                 colspan = int(col.get('colspan', 1))
                 bt = col.get('BorderTop', 'solid')
@@ -706,7 +732,7 @@ def _check_table_has_non_solid_border(table, header, body_rows):
     # 全て solid
     return False
 
-def render_table(table, indent):
+def render_table(table, indent, law_revision_id=None, image_dir=None):
     """
     テーブルをHTMLにレンダリング
     
@@ -715,6 +741,12 @@ def render_table(table, indent):
     
     ✨ 改善: テーブル内の全セルの border-style が "solid" の場合はスタイル指定を一切しない。
     1セルでも "none" | "dotted" | "double" があれば全セルに対してスタイル指定を行う。
+    
+    Args:
+        table: Table要素
+        indent: インデントレベル
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
     """
     indent_str = "  " * indent
     html_lines = []
@@ -748,8 +780,8 @@ def render_table(table, indent):
         html_lines.append(f"{indent_str}  <thead>")
         html_lines.append(f"{indent_str}    <tr>")
         for col in body_rows[0].findall("TableColumn"):
-            # ✨ 改善: ヘッダーでも構造要素を処理
-            col_text = process_table_column_content(col)
+            # ✨ 改善: ヘッダーでも構造要素を処理（画像パラメータも渡す）
+            col_text = process_table_column_content(col, law_revision_id, image_dir)
             attrs = get_cell_attributes(col, "th", enable_border_style=has_non_solid_border)
             html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
         html_lines.append(f"{indent_str}    </tr>")
@@ -758,8 +790,8 @@ def render_table(table, indent):
     
     # ボディ行処理（グリッドベース）
     if body_rows:
-        # 論理グリッドを構築
-        grid = build_logical_table_grid(body_rows)
+        # 論理グリッドを構築（画像パラメータも渡す）
+        grid = build_logical_table_grid(body_rows, law_revision_id, image_dir)
         
         if grid:
             html_lines.append(f"{indent_str}  <tbody>")
@@ -892,26 +924,35 @@ def get_cell_attributes(cell, cell_type="td", rowspan_override=None, enable_bord
         return " " + " ".join(attrs)
     return ""
 
-def render_table_struct(ts, indent):
+def render_table_struct(ts, indent, law_revision_id=None, image_dir=None):
+    """
+    TableStruct要素をHTMLに変換
+    
+    Args:
+        ts: TableStruct要素
+        indent: インデントレベル
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
+    """
     html = ""
     indent_str = "  " * indent
     title = ts.find("TableStructTitle")
     if title is not None: 
         title_text = normalize_text(extract_text(title))
         html += f"{indent_str}<div class=\"table-struct\">\n"
-        html += f"{indent_str}  <div class=\"table-struct-title\">{title_text}</div>\n"
+        html += f"{indent_str}  <div class=\"table-struct-title\">{title_text}</div>\n\n"
     
     # Remarksを処理
     for remarks in ts.findall("Remarks"):
         remarks_text = process_remarks(remarks)
         if remarks_text:
-            html += f"{indent_str}  {remarks_text}\n"
+            html += f"{indent_str}  {remarks_text}\n\n"
     
     tbl = ts.find("Table")
     if tbl is not None:
-        html += render_table(tbl, indent + 1)
+        html += render_table(tbl, indent + 1, law_revision_id, image_dir)
     if title is not None:
-        html += f"{indent_str}</div>\n"
+        html += f"{indent_str}</div>\n\n"
     return html
 
 def process_list(list_elem, indent_level):
@@ -977,13 +1018,13 @@ def process_column(column):
     else:
         return normalize_text(extract_text(column))
 
-def process_child_elements(parent, indent):
+def process_child_elements(parent, indent, law_revision_id=None, image_dir=None):
     md = ""
     for list_elem in parent.findall("List"): md += process_list(list_elem, indent)
-    for ts in parent.findall("TableStruct"): md += "\n" + render_table_struct(ts, indent)
-    for t in parent.findall("Table"): md += "\n" + render_table(t, indent)
-    for fs in parent.findall("FigStruct"): md += "\n" + process_fig_struct(fs)
-    for f in parent.findall("Fig"): md += "\n" + process_fig(f)
+    for ts in parent.findall("TableStruct"): md += "\n" + render_table_struct(ts, indent, law_revision_id, image_dir)
+    for t in parent.findall("Table"): md += "\n" + render_table(t, indent, law_revision_id, image_dir)
+    for fs in parent.findall("FigStruct"): md += "\n" + process_fig_struct(fs, law_revision_id, image_dir)
+    for f in parent.findall("Fig"): md += "\n" + process_fig(f, law_revision_id, image_dir)
     for ss in parent.findall("StyleStruct"): md += "\n" + process_style_struct(ss)
     for ns in parent.findall("NoteStruct"): md += "\n" + process_note_struct(ns)
     for fs in parent.findall("FormatStruct"): md += "\n" + process_format_struct(fs)
@@ -1053,7 +1094,7 @@ def process_subitem(subitem, indent_level, tag_name, sent_tag_name):
 
 # --- 附則別表など構造要素の処理関数 ---
 
-def _appdx_common(elem):
+def _appdx_common(elem, law_revision_id=None, image_dir=None):
     md = ""
     for child in elem:
         if "Title" in child.tag:
@@ -1069,12 +1110,12 @@ def _appdx_common(elem):
     for p in elem.findall("Paragraph"):
         s = p.find(".//Sentence")
         if s is not None: md += f"{normalize_text(extract_text(s))}\n\n"
-    for ts in elem.findall("TableStruct"): md += render_table_struct(ts, 0)
-    for t in elem.findall("Table"): md += render_table(t, 0)
+    for ts in elem.findall("TableStruct"): md += render_table_struct(ts, 0, law_revision_id, image_dir)
+    for t in elem.findall("Table"): md += render_table(t, 0, law_revision_id, image_dir)
     for ss in elem.findall("StyleStruct"): md += process_style_struct(ss)
     for fs in elem.findall("FormatStruct"): md += process_format_struct(fs)
     for ns in elem.findall("NoteStruct"): md += process_note_struct(ns)
-    for fig_s in elem.findall("FigStruct"): md += process_fig_struct(fig_s)
+    for fig_s in elem.findall("FigStruct"): md += process_fig_struct(fig_s, law_revision_id, image_dir)
     
     # Remarksを処理
     for remarks in elem.findall("Remarks"):
@@ -1088,7 +1129,7 @@ def _appdx_common(elem):
     
     return md
 
-def process_appdx_table(elem): 
+def process_appdx_table(elem, law_revision_id=None, image_dir=None): 
     """別表を処理"""
     md = ""
     # AppdxTableTitleを処理
@@ -1104,11 +1145,11 @@ def process_appdx_table(elem):
     
     # TableStructを処理
     for ts in elem.findall("TableStruct"): 
-        md += render_table_struct(ts, 0)
+        md += render_table_struct(ts, 0, law_revision_id, image_dir)
     
     # 直接のTableを処理
     for t in elem.findall("Table"): 
-        md += render_table(t, 0)
+        md += render_table(t, 0, law_revision_id, image_dir)
     
     # Remarksを処理
     for remarks in elem.findall("Remarks"):
@@ -1122,17 +1163,17 @@ def process_appdx_table(elem):
     
     return md
 
-def process_appdx_note(elem): 
+def process_appdx_note(elem, law_revision_id=None, image_dir=None): 
     """別記を処理"""
-    return _appdx_common(elem)
+    return _appdx_common(elem, law_revision_id, image_dir)
 
-def process_appdx_style(elem): 
+def process_appdx_style(elem, law_revision_id=None, image_dir=None): 
     """別記様式を処理"""
-    return _appdx_common(elem)
+    return _appdx_common(elem, law_revision_id, image_dir)
 
-def process_appdx_format(elem): 
+def process_appdx_format(elem, law_revision_id=None, image_dir=None): 
     """別記書式を処理"""
-    return _appdx_common(elem)
+    return _appdx_common(elem, law_revision_id, image_dir)
 
 def process_appdx_fig(elem): 
     """別図を処理"""
@@ -1174,7 +1215,7 @@ def process_appdx(elem):
             md += f"{remarks_text}\n\n"
     return md
 
-def process_suppl_provision_appdx_table(elem):
+def process_suppl_provision_appdx_table(elem, law_revision_id=None, image_dir=None):
     """附則別表を処理"""
     if elem is None: return ""
     md = ""
@@ -1188,7 +1229,7 @@ def process_suppl_provision_appdx_table(elem):
             md += f"*{rel_text}*\n\n"
     # TableStruct を処理
     for ts in elem.findall("TableStruct"):
-        md += render_table_struct(ts, 0)
+        md += render_table_struct(ts, 0, law_revision_id, image_dir)
     return md
 
 def process_suppl_provision_appdx_style(elem):
@@ -1227,7 +1268,7 @@ def process_suppl_provision_appdx(elem):
 
 # --- 構造要素処理関数 (Part, Chapter, Articleなど) ---
 
-def process_amend_provision(xml_root):
+def process_amend_provision(xml_root, law_revision_id=None, image_dir=None):
     """改正規定を処理（NewProvision内の全構造要素に対応）
     
     NewProvisionはスキーマ上、以下の要素を含むことができます:
@@ -1235,6 +1276,11 @@ def process_amend_provision(xml_root):
     <Subsection> | <Division> | <Article> | <Paragraph> | <Item> | など
     
     これらを適切に処理して改正内容を出力します。
+    
+    Args:
+        xml_root: XML root要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
     """
     amend_provs = xml_root.findall(".//AmendProvision")
     if not amend_provs: return ""
@@ -1251,15 +1297,20 @@ def process_amend_provision(xml_root):
         
         # NewProvision内の構造要素を処理
         for new_prov in amend_prov.findall("NewProvision"):
-            md += process_new_provision(new_prov)
+            md += process_new_provision(new_prov, law_revision_id, image_dir)
     
     return md
 
-def process_new_provision(new_prov):
+def process_new_provision(new_prov, law_revision_id=None, image_dir=None):
     """NewProvision（改正規定中の新規条文）を処理
     
     NewProvisionには法令本体と同様の構造が含まれるため、
     構造要素を順次処理します。
+    
+    Args:
+        new_prov: NewProvision要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
     """
     md = ""
     
@@ -1307,11 +1358,11 @@ def process_new_provision(new_prov):
     
     # TableStruct（表）
     for table_struct in new_prov.findall("TableStruct"):
-        md += render_table_struct(table_struct, 0)
+        md += render_table_struct(table_struct, 0, law_revision_id, image_dir)
     
     # FigStruct（図）
     for fig_struct in new_prov.findall("FigStruct"):
-        md += process_fig_struct(fig_struct)
+        md += process_fig_struct(fig_struct, law_revision_id, image_dir)
     
     # StyleStruct（様式）
     for style_struct in new_prov.findall("StyleStruct"):
@@ -1385,14 +1436,21 @@ def process_single_paragraph(para, total_p):
         
     return md
 
-def process_article(article, heading_level):
+def process_article(article, heading_level=4):
+    """条の処理（常にH4で出力）
+    
+    Args:
+        article: Article要素
+        heading_level: 見出しレベル（デフォルト4、Article固定アンカー）
+    """
     md = ""
     num = article.get("Num", "")
     label = convert_article_num(num)
     caption = article.find("ArticleCaption")
     cap_text = normalize_text(extract_text(caption)) if caption is not None else ""
     
-    md += f"{'#' * heading_level} {label}{cap_text}\n"
+    # Articleは常にH4で出力（固定アンカー）
+    md += f"#### {label}{cap_text}\n"
     
     paragraphs = article.findall("Paragraph")
     total_p = len(paragraphs)
@@ -1450,9 +1508,30 @@ def process_article(article, heading_level):
     return md
 
 def get_hierarchy_level(tag):
-    return {"Part": 2, "Chapter": 3, "Section": 4, "Subsection": 5, "Division": 6}.get(tag, 2)
+    """
+    階層要素のMarkdown見出しレベルを取得
+    
+
+    - Part: H1 (#)
+    - Chapter: H2 (##)
+    - Section: H3 (###)
+    - Subsection/Division: 太字（見出しレベルを消費しない）
+    - Article: H4 (####) ※ただし、Articleは固定でH4
+    """
+    return {"Part": 1, "Chapter": 2, "Section": 3}.get(tag, 2)
 
 def process_structure_element(element, heading_level=None):
+    """構造要素（Part/Chapter/Section/Subsection/Division）を処理
+    
+    階層マッピング:
+    - Part: H1 (#)
+    - Chapter: H2 (##)
+    - Section: H3 (###)
+    - Subsection: 太字（**第三款 〇〇**）
+    - Division: 太字（**第一目 〇〇**）
+    
+    Article（条）は常にH4 (####) で固定。
+    """
     if heading_level is None:
         heading_level = get_hierarchy_level(element.tag)
     
@@ -1465,7 +1544,11 @@ def process_structure_element(element, heading_level=None):
     if title_tag:
         t_elem = element.find(title_tag)
         if t_elem is not None:
-            md += f"{'#' * heading_level} {normalize_text(extract_text(t_elem))}\n\n"
+            # Subsection/Divisionは太字で出力（見出しレベルを消費しない）
+            if element.tag in ["Subsection", "Division"]:
+                md += f"**{normalize_text(extract_text(t_elem))}**\n\n"
+            else:
+                md += f"{'#' * heading_level} {normalize_text(extract_text(t_elem))}\n\n"
     
     hierarchy = ["Part", "Chapter", "Section", "Subsection", "Division"]
     if element.tag in hierarchy:
@@ -1475,8 +1558,9 @@ def process_structure_element(element, heading_level=None):
             for child in element.findall(next_tag):
                 md += process_structure_element(child)
     
+    # Articleは常にH4で固定
     for article in element.findall("Article"):
-        md += process_article(article, min(heading_level + 1, 6))
+        md += process_article(article, 4)
     
     return md
 
@@ -1586,32 +1670,38 @@ def extract_suppl_provision(xml_root):
 
     return md
 
-def process_all_appdx(parent_element):
-    """別表、別記、様式などをまとめて処理"""
+def process_all_appdx(parent_element, law_revision_id=None, image_dir=None):
+    """別表、別記、様式などをまとめて処理
+    
+    Args:
+        parent_element: 親要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
+    """
     md = ""
     appdx_tables = parent_element.findall("AppdxTable")
     if appdx_tables:
         md += "# 別表\n\n"
         for appdx_table in appdx_tables:
-            md += process_appdx_table(appdx_table)
+            md += process_appdx_table(appdx_table, law_revision_id, image_dir)
     
     appdx_notes = parent_element.findall("AppdxNote")
     if appdx_notes:
         md += "# 別記\n\n"
         for appdx_note in appdx_notes:
-            md += process_appdx_note(appdx_note)
+            md += process_appdx_note(appdx_note, law_revision_id, image_dir)
     
     appdx_styles = parent_element.findall("AppdxStyle")
     if appdx_styles:
         md += "# 様式\n\n"
         for appdx_style in appdx_styles:
-            md += process_appdx_style(appdx_style)
+            md += process_appdx_style(appdx_style, law_revision_id, image_dir)
     
     appdx_formats = parent_element.findall("AppdxFormat")
     if appdx_formats:
         md += "# 書式\n\n"
         for appdx_format in appdx_formats:
-            md += process_appdx_format(appdx_format)
+            md += process_appdx_format(appdx_format, law_revision_id, image_dir)
     
     appdx_figs = parent_element.findall("AppdxFig")
     if appdx_figs:
@@ -1626,8 +1716,8 @@ def process_all_appdx(parent_element):
             md += process_appdx(appdx)
     
     return md
-
-def get_table_css_style():
+# cssは外部で読み込む想定のためコメントアウト
+# def get_table_css_style():
     """テーブル用のCSSスタイルを返す
     
     HTML表の枠線スタイルを正確に表現するためのCSS。
@@ -1797,8 +1887,15 @@ def extract_law_metadata(root, revision_meta=None):
 # Main Parser
 # ==========================================
 
-def parse_to_markdown(xml_content, law_name_override=None):
-    """XMLバイナリデータをMarkdown文字列に変換"""
+def parse_to_markdown(xml_content, law_name_override=None, law_revision_id=None, image_dir=None):
+    """XMLバイナリデータをMarkdown文字列に変換
+    
+    Args:
+        xml_content: XMLバイナリデータ
+        law_name_override: 法令名の上書き
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
+    """
     try:
         root = ET.fromstring(xml_content)
     except ET.ParseError as e:
@@ -1849,7 +1946,8 @@ def parse_to_markdown(xml_content, law_name_override=None):
 
     markdown_text = f"# {law_name}\n\n"
     # CSS スタイルを先頭に追加（テーブルの枠線表示用）
-    markdown_text += get_table_css_style()
+    # markdown_text += get_table_css_style()
+    # cssスタイルは外部で追加する場合があるためコメントアウト
     markdown_text += "\n"
     markdown_text += extract_law_metadata(root, revision_meta)
     
@@ -1875,11 +1973,11 @@ def parse_to_markdown(xml_content, law_name_override=None):
                 markdown_text += process_single_paragraph(para, total_p)
     
     markdown_text += extract_suppl_provision(root)
-    markdown_text += process_amend_provision(root)
+    markdown_text += process_amend_provision(root, law_revision_id, image_dir)
     
     law_body = root.find(".//LawBody")
     if law_body is not None:
-        markdown_text += process_all_appdx(law_body)
+        markdown_text += process_all_appdx(law_body, law_revision_id, image_dir)
     
     return markdown_text, law_name, abbrev, law_id, enforcement_date
 
@@ -1968,20 +2066,24 @@ def load_xml_from_file(file_path):
         print(f"エラー: ファイルの読み込みに失敗しました。({e})")
         return None
 
-def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None, law_id=None, enforcement_date=None):
-    """ファイルを保存し、既存ファイルがあれば上書き確認"""
-    global CURRENT_IMAGE_DIR
+def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None, law_id=None, enforcement_date=None, image_dir=None):
+    """ファイルを保存し、既存ファイルがあれば上書き確認
     
+    Args:
+        law_name: 法令名
+        md_output: Markdown出力
+        force_overwrite: 強制上書きフラグ
+        abbrev: 略称
+        law_id: 法令ID
+        enforcement_date: 施行日
+        image_dir: 画像保存先ディレクトリ（既に設定済みの場合）
+    """
     safe_law_name = "".join(c for c in law_name if c not in '<>:"/\\|?*')
     date_suffix = f"_{enforcement_date.replace('-', '')}" if enforcement_date else ""
     
     output_dir = "output_Markdown"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    
-    # 画像保存ディレクトリを設定
-    image_dir_name = f"{safe_law_name}{date_suffix}_images"
-    CURRENT_IMAGE_DIR = os.path.join(output_dir, image_dir_name)
     
     filename = os.path.join(output_dir, f"{safe_law_name}{date_suffix}.md")
     
@@ -2009,21 +2111,37 @@ def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None, 
 
 
 def process_from_api(law_name, force=False, asof_date=None):
-    """APIから法令を取得して保存"""
-    global CURRENT_LAW_REVISION_ID, CURRENT_IMAGE_DIR
+    """APIから法令を取得して保存
     
+    Args:
+        law_name: 法令名
+        force: 強制上書きフラグ
+        asof_date: 時点指定（YYYY-MM-DD形式）
+    """
     xml_data, law_revision_id = fetch_law_data(law_name, asof_date)
     if xml_data:
-        # グローバル変数に法令履歴IDを設定
-        CURRENT_LAW_REVISION_ID = law_revision_id
+        # 画像保存ディレクトリを準備
+        # まず一時的にパースして法令名と施行日を取得
+        root = ET.fromstring(xml_data)
+        real_law_name = extract_law_title_from_root(root)
+        enforcement_date = None
+        if root.tag == "law_data_response":
+            rev_info = root.find("revision_info")
+            if rev_info is not None:
+                enforcement_date = extract_text(rev_info.find("amendment_enforcement_date"))
         
-        md_output, real_law_name, abbrev, law_id, enforcement_date = parse_to_markdown(xml_data, law_name)
+        safe_law_name = "".join(c for c in real_law_name if c not in '<>:"/\\|?*')
+        date_suffix = f"_{enforcement_date.replace('-', '')}" if enforcement_date else ""
+        output_dir = "output_Markdown"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        image_dir_name = f"{safe_law_name}{date_suffix}_images"
+        image_dir = os.path.join(output_dir, image_dir_name)
+        
+        # 最終的なMarkdownを生成（law_revision_idとimage_dirを渡す）
+        md_output, real_law_name, abbrev, law_id, enforcement_date = parse_to_markdown(xml_data, law_name, law_revision_id, image_dir)
         if md_output:
-            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev, law_id=law_id, enforcement_date=enforcement_date)
-        
-        # 処理後にクリア
-        CURRENT_LAW_REVISION_ID = None
-        CURRENT_IMAGE_DIR = None
+            save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev, law_id=law_id, enforcement_date=enforcement_date, image_dir=image_dir)
 
 def process_from_file(file_path, force=False):
     """ローカルファイルから変換して保存"""
