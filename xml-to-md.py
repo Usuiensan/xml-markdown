@@ -752,7 +752,7 @@ def process_remarks(remarks_elem):
         if line_break:
             md += f"**{label_text}**\n\n"
         else:
-            md += f"**{label_text}**\n\n"
+            md += f"**{label_text}**\n"
     
     # 備考の項目
     for item in remarks_elem.findall("Item"):
@@ -761,7 +761,7 @@ def process_remarks(remarks_elem):
         item_sent = item.find("ItemSentence")
         if item_sent is not None:
             sent_text = normalize_text(extract_text(item_sent))
-            md += f"- {item_label}\n{sent_text}\n"
+            md += f"- {item_label}\n\n  {sent_text}\n"
     
     # 備考の文章
     for sentence in remarks_elem.findall("Sentence"):
