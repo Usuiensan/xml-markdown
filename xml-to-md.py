@@ -596,7 +596,7 @@ def process_fig_struct(fs, law_revision_id=None, image_dir=None):
     if fig is not None: md += process_fig(fig, law_revision_id, image_dir)
     return md
 
-def _struct_common(elem, title_tag, mark):
+def _struct_common(elem, title_tag, mark, law_revision_id=None, image_dir=None):
     md = ""
     title = elem.find(title_tag)
     if title is not None:
@@ -605,11 +605,20 @@ def _struct_common(elem, title_tag, mark):
         sent = para.find(".//Sentence")
         if sent is not None:
              md += f"{normalize_text(extract_text(sent))}\n\n"
+    for fig_struct in elem.findall("FigStruct"):
+        md += process_fig_struct(fig_struct, law_revision_id, image_dir)
+    for fig in elem.findall("Fig"):
+        md += process_fig(fig, law_revision_id, image_dir)
     return md
 
-def process_style_struct(ss): return _struct_common(ss, "StyleStructTitle", "**")
-def process_note_struct(ns): return _struct_common(ns, "NoteStructTitle", "")
-def process_format_struct(fs): return _struct_common(fs, "FormatStructTitle", "**")
+def process_style_struct(ss, law_revision_id=None, image_dir=None):
+    return _struct_common(ss, "StyleStructTitle", "**", law_revision_id, image_dir)
+
+def process_note_struct(ns, law_revision_id=None, image_dir=None):
+    return _struct_common(ns, "NoteStructTitle", "", law_revision_id, image_dir)
+
+def process_format_struct(fs, law_revision_id=None, image_dir=None):
+    return _struct_common(fs, "FormatStructTitle", "**", law_revision_id, image_dir)
 def process_class(cls): return _struct_common(cls, "ClassTitle", "### ")
 
 # ==========================================
@@ -1131,9 +1140,9 @@ def process_child_elements(parent, indent, law_revision_id=None, image_dir=None)
     for t in parent.findall("Table"): md += "\n" + render_table(t, indent, law_revision_id, image_dir)
     for fs in parent.findall("FigStruct"): md += "\n" + process_fig_struct(fs, law_revision_id, image_dir)
     for f in parent.findall("Fig"): md += "\n" + process_fig(f, law_revision_id, image_dir)
-    for ss in parent.findall("StyleStruct"): md += "\n" + process_style_struct(ss)
-    for ns in parent.findall("NoteStruct"): md += "\n" + process_note_struct(ns)
-    for fs in parent.findall("FormatStruct"): md += "\n" + process_format_struct(fs)
+    for ss in parent.findall("StyleStruct"): md += "\n" + process_style_struct(ss, law_revision_id, image_dir)
+    for ns in parent.findall("NoteStruct"): md += "\n" + process_note_struct(ns, law_revision_id, image_dir)
+    for fs in parent.findall("FormatStruct"): md += "\n" + process_format_struct(fs, law_revision_id, image_dir)
     for cls in parent.findall("Class"): md += "\n" + process_class(cls)
     # Column 要素（独立している場合）も処理
     for col in parent.findall("Column"):
@@ -1218,9 +1227,9 @@ def _appdx_common(elem, law_revision_id=None, image_dir=None):
         if s is not None: md += f"{normalize_text(extract_text(s))}\n\n"
     for ts in elem.findall("TableStruct"): md += render_table_struct(ts, 0, law_revision_id, image_dir)
     for t in elem.findall("Table"): md += render_table(t, 0, law_revision_id, image_dir)
-    for ss in elem.findall("StyleStruct"): md += process_style_struct(ss)
-    for fs in elem.findall("FormatStruct"): md += process_format_struct(fs)
-    for ns in elem.findall("NoteStruct"): md += process_note_struct(ns)
+    for ss in elem.findall("StyleStruct"): md += process_style_struct(ss, law_revision_id, image_dir)
+    for fs in elem.findall("FormatStruct"): md += process_format_struct(fs, law_revision_id, image_dir)
+    for ns in elem.findall("NoteStruct"): md += process_note_struct(ns, law_revision_id, image_dir)
     for fig_s in elem.findall("FigStruct"): md += process_fig_struct(fig_s, law_revision_id, image_dir)
     
     # Remarksを処理
@@ -1344,7 +1353,7 @@ def process_suppl_provision_appdx_table(elem, law_revision_id=None, image_dir=No
         md += render_table_struct(ts, 0, law_revision_id, image_dir)
     return md
 
-def process_suppl_provision_appdx_style(elem):
+def process_suppl_provision_appdx_style(elem, law_revision_id=None, image_dir=None):
     """附則様式を処理"""
     if elem is None: return ""
     md = ""
@@ -1358,7 +1367,7 @@ def process_suppl_provision_appdx_style(elem):
             md += f"*{rel_text}*\n\n"
     # StyleStruct を処理
     for ss in elem.findall("StyleStruct"):
-        md += process_style_struct(ss)
+        md += process_style_struct(ss, law_revision_id, image_dir)
     return md
 
 def process_suppl_provision_appdx(elem):
@@ -1478,15 +1487,15 @@ def process_new_provision(new_prov, law_revision_id=None, image_dir=None):
     
     # StyleStruct（様式）
     for style_struct in new_prov.findall("StyleStruct"):
-        md += process_style_struct(style_struct)
+        md += process_style_struct(style_struct, law_revision_id, image_dir)
     
     # NoteStruct（記）
     for note_struct in new_prov.findall("NoteStruct"):
-        md += process_note_struct(note_struct)
+        md += process_note_struct(note_struct, law_revision_id, image_dir)
     
     # FormatStruct（書式）
     for format_struct in new_prov.findall("FormatStruct"):
-        md += process_format_struct(format_struct)
+        md += process_format_struct(format_struct, law_revision_id, image_dir)
     
     # Remarks（備考）
     for remarks in new_prov.findall("Remarks"):
@@ -1754,7 +1763,7 @@ def process_toc_element(element, indent):
     
     return md
 
-def extract_suppl_provision(xml_root):
+def extract_suppl_provision(xml_root, law_revision_id=None, image_dir=None):
     suppl = xml_root.find(".//SupplProvision")
     if suppl is None: return ""
     md = "# 附則\n\n"
@@ -1773,7 +1782,7 @@ def extract_suppl_provision(xml_root):
             if sent is not None:
                 md += f"- {normalize_text(extract_text(sent))}\n"
     
-    md += process_all_appdx(suppl)
+    md += process_all_appdx(suppl, law_revision_id, image_dir)
     
     # 附則別表を処理
     suppl_appdx_tables = suppl.findall("SupplProvisionAppdxTable")
@@ -1787,7 +1796,7 @@ def extract_suppl_provision(xml_root):
     if suppl_appdx_styles:
         md += "## 附則様式\n\n"
         for style in suppl_appdx_styles:
-            md += process_suppl_provision_appdx_style(style)
+            md += process_suppl_provision_appdx_style(style, law_revision_id, image_dir)
     
     # 附則付録を処理
     suppl_appdxs = suppl.findall("SupplProvisionAppdx")
@@ -2103,7 +2112,7 @@ def parse_to_markdown(xml_content, law_name_override=None, law_revision_id=None,
             for para in direct_paragraphs:
                 markdown_text += process_single_paragraph(para, total_p)
     
-    markdown_text += extract_suppl_provision(root)
+    markdown_text += extract_suppl_provision(root, law_revision_id, image_dir)
     markdown_text += process_amend_provision(root, law_revision_id, image_dir)
     
     law_body = root.find(".//LawBody")
