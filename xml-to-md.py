@@ -802,37 +802,96 @@ def _check_table_has_non_solid_border(table, header, body_rows):
     # 全て solid
     return False
 
+def _check_table_has_non_solid_border(table, header, body_rows):
+    """
+    テーブル内に solid 以外の border-style があるかを確認
+    
+    Returns:
+        bool: True = solid以外あり（スタイル指定必要）、False = 全てsolid（スタイル指定不要）
+    """
+    target_attrs = ["BorderTop", "BorderBottom", "BorderLeft", "BorderRight"]
+    
+    # ヘッダーセルをチェック
+    if header is not None:
+        for col in header.findall("TableHeaderColumn"):
+            for attr in target_attrs:
+                if col.get(attr, "solid") != "solid":
+                    return True
+    
+    # ボディセルをチェック
+    for row in body_rows:
+        for col in row.findall("TableColumn"):
+            for attr in target_attrs:
+                if col.get(attr, "solid") != "solid":
+                    return True
+    
+    # 全て solid
+    return False
 
 def render_table(table, indent, law_revision_id=None, image_dir=None):
     """
-    テーブルをHTMLにレンダリング（改修版）
+    テーブルをHTMLにレンダリング（改修版：トークン削減・スタイル最適化）
     """
     indent_str = "  " * indent
     html_lines = []
     
-    # テーブルクラス設定 (省略可能だが元のロジックを尊重)
+    # --- 1. クラス設定 (Horizontalは省略) ---
     writing_mode = table.get("WritingMode", "horizontal-tb")
-    table_class = 'writing-mode-vertical' if writing_mode == "vertical-rl" else 'writing-mode-horizontal'
+    table_attrs = ' style="border-collapse: collapse;"'
     
-    # style="border-collapse: collapse;" は必須に近いので追加推奨
-    html_lines.append(f'{indent_str}<table class="{table_class}" style="border-collapse: collapse;">')
+    # 縦書きの場合のみクラスを追加
+    if writing_mode == "vertical-rl":
+        table_attrs += ' class="writing-mode-vertical"'
+    
+    html_lines.append(f'{indent_str}<table{table_attrs}>')
     
     # ヘッダーとボディの取得
     header = table.find("TableHeaderRow")
     body_rows_xml = list(table.findall("TableRow"))
     
+    # --- 2. 枠線スタイルの判定 ---
+    # 表の中に none/dotted/double が一つでもあれば True
+    has_non_solid_border = _check_table_has_non_solid_border(table, header, body_rows_xml)
+    
     # ---------------------------------------------------------
-    # theadの処理 (単純なヘッダーのみ対応)
-    # rowspanを含む複雑なヘッダーの場合は、theadを使わずtbodyにまとめる手もあるが、
-    # ここでは分離して処理する
+    # theadの処理
     # ---------------------------------------------------------
     if header is not None:
         html_lines.append(f"{indent_str}  <thead>")
         html_lines.append(f"{indent_str}    <tr>")
         for header_col in header.findall("TableHeaderColumn"):
             col_text = normalize_text(extract_text(header_col))
-            # borderスタイル等は簡易的に処理
-            html_lines.append(f'{indent_str}      <th style="border: 1px solid black;">{col_text}</th>')
+            
+            # 属性の組み立て
+            th_attrs = []
+            
+            # rowspan/colspan
+            rs = header_col.get("rowspan", "1")
+            cs = header_col.get("colspan", "1")
+            if rs != "1": th_attrs.append(f'rowspan="{rs}"')
+            if cs != "1": th_attrs.append(f'colspan="{cs}"')
+            
+            # スタイル（枠線）の組み立て
+            if has_non_solid_border:
+                style_parts = []
+                border_map = {
+                    "BorderTop": "border-top-style",
+                    "BorderBottom": "border-bottom-style",
+                    "BorderLeft": "border-left-style",
+                    "BorderRight": "border-right-style"
+                }
+                for attr, css_prop in border_map.items():
+                    val = header_col.get(attr, "solid")
+                    if val != "solid":
+                        style_parts.append(f"{css_prop}: {val}")
+                
+                if style_parts:
+                    th_attrs.append(f'style="{"; ".join(style_parts)}"')
+            
+            # 属性文字列の結合
+            attrs_str = " " + " ".join(th_attrs) if th_attrs else ""
+            html_lines.append(f'{indent_str}      <th{attrs_str}>{col_text}</th>')
+            
         html_lines.append(f"{indent_str}    </tr>")
         html_lines.append(f"{indent_str}  </thead>")
     
@@ -849,37 +908,44 @@ def render_table(table, indent, law_revision_id=None, image_dir=None):
             html_lines.append(f"{indent_str}    <tr>")
             
             for cell in row_cells:
-                # 重要: 'occupied' (他セルに占有されている場所) はHTMLタグを出力しない
+                # 'occupied' (他セルに占有されている場所) は出力しない
                 if cell['type'] == 'occupied':
                     continue
                 
                 # 属性の組み立て
-                attrs = []
+                td_attrs = []
                 if cell['rs'] > 1:
-                    attrs.append(f'rowspan="{cell["rs"]}"')
+                    td_attrs.append(f'rowspan="{cell["rs"]}"')
                 if cell['colspan'] > 1:
-                    attrs.append(f'colspan="{cell["colspan"]}"')
+                    td_attrs.append(f'colspan="{cell["colspan"]}"')
                 
-                # スタイルの組み立て
-                style_parts = []
-                # 枠線 (XMLの属性をCSSに変換)
-                border_map = {'bt': 'border-top', 'bb': 'border-bottom', 'bl': 'border-left', 'br': 'border-right'}
-                for key, css_prop in border_map.items():
-                    val = cell.get(key)
-                    if val == 'solid':
-                        style_parts.append(f"{css_prop}: 1px solid black")
-                    elif val == 'none':
-                        # 明示的に消す場合
-                        style_parts.append(f"{css_prop}: none")
-                    # デフォルトの枠線が必要ならここで else: style_parts.append(...) を追加
+                # スタイル（枠線）の組み立て
+                # has_non_solid_border が False の場合は style 属性自体を出力しない（トークン削減）
+                if has_non_solid_border:
+                    style_parts = []
+                    # build_logical_table_grid で取得済みの border 属性を使用
+                    # map: {'bt': 'BorderTop', ...} -> CSS
+                    border_map = {
+                        'bt': 'border-top-style',
+                        'bb': 'border-bottom-style',
+                        'bl': 'border-left-style',
+                        'br': 'border-right-style'
+                    }
+                    
+                    for key, css_prop in border_map.items():
+                        val = cell.get(key, 'solid')
+                        # solid 以外の場合のみ style を出力
+                        # (solid は CSS のデフォルト TD スタイルに任せる)
+                        if val != 'solid':
+                            style_parts.append(f"{css_prop}: {val}")
+                    
+                    if style_parts:
+                        td_attrs.append(f'style="{"; ".join(style_parts)}"')
                 
-                # Alignment (必要であれば追加)
-                # align = cell['xml'].get('Align') ...
+                # 属性文字列の結合
+                attrs_str = " " + " ".join(td_attrs) if td_attrs else ""
                 
-                style_attr = f' style="{"; ".join(style_parts)}"' if style_parts else ""
-                attrs_str = " " + " ".join(attrs) if attrs else ""
-                
-                html_lines.append(f'{indent_str}      <td{attrs_str}{style_attr}>{cell["text"]}</td>')
+                html_lines.append(f'{indent_str}      <td{attrs_str}>{cell["text"]}</td>')
             
             html_lines.append(f"{indent_str}    </tr>")
             
