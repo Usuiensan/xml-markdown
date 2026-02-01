@@ -18,9 +18,66 @@ TABLE_PROCESSING_MODE = "hybrid"
 # ログ出力設定（トラブル診断用）
 TABLE_ROWSPAN_DEBUG = False
 
+# 画像ダウンロード設定
+DOWNLOAD_IMAGES = True  # 画像を自動ダウンロードするかどうか
+CURRENT_LAW_REVISION_ID = None  # 現在処理中の法令履歴ID
+CURRENT_IMAGE_DIR = None  # 現在の画像保存ディレクトリ
+
 # ==========================================
 # ユーティリティ関数
 # ==========================================
+
+def download_image_from_api(law_revision_id, src_attr, image_dir):
+    """e-Gov APIから画像をダウンロードして保存
+    
+    Args:
+        law_revision_id: 法令履歴ID（例: 411AC0000000127_19990813_000000000000000）
+        src_attr: Fig要素のsrc属性（例: ./pict/H11HO127-001.jpg）
+        image_dir: 画像保存先ディレクトリ
+    
+    Returns:
+        str: 保存された画像の相対パス、失敗時はNone
+    """
+    if not DOWNLOAD_IMAGES or not law_revision_id or not src_attr:
+        return None
+    
+    # 画像保存ディレクトリの作成
+    os.makedirs(image_dir, exist_ok=True)
+    
+    # ファイル名を抽出（例: ./pict/H11HO127-001.jpg → H11HO127-001.jpg）
+    filename = os.path.basename(src_attr)
+    
+    # 保存先パス
+    save_path = os.path.join(image_dir, filename)
+    
+    # 既にダウンロード済みの場合はスキップ
+    if os.path.exists(save_path):
+        print(f"[画像] 既存: {filename}")
+        return os.path.join(os.path.basename(image_dir), filename)
+    
+    # APIエンドポイント
+    api_url = f"https://laws.e-gov.go.jp/api/2/laws/{law_revision_id}/attachments"
+    params = {"src": src_attr}
+    
+    try:
+        print(f"[画像] ダウンロード中: {filename}")
+        response = requests.get(api_url, params=params, timeout=30)
+        
+        if response.status_code == 200:
+            # 画像を保存
+            with open(save_path, 'wb') as f:
+                f.write(response.content)
+            print(f"[画像] 保存完了: {save_path}")
+            
+            # 相対パスを返す（Markdownから参照するため）
+            return os.path.join(os.path.basename(image_dir), filename)
+        else:
+            print(f"[警告] 画像ダウンロード失敗: {filename} (HTTP {response.status_code})")
+            return None
+    
+    except Exception as e:
+        print(f"[エラー] 画像ダウンロード失敗: {filename} - {str(e)}")
+        return None
 
 def normalize_text(text: str) -> str:
     """空白・改行を除去して1行にする"""
@@ -108,22 +165,183 @@ def convert_item_num(num_str):
         result += "の" + part
     return result + "号"
 
+def process_table_column_content(col_elem):
+    """TableColumn内の構造要素を処理してHTMLセル内容を生成
+    
+    TableColumnには <Sentence>, <Item>, <Paragraph>, <Column> などの構造要素が
+    含まれることがあります。これらを改行で繋ぎ、階層構造を維持します。
+    
+    スキーマ上の可能な子要素:
+    <Part> | <Chapter> | <Section> | <Subsection> | <Division> | <Article> | 
+    <Paragraph> | <Item> | <Subitem1-10> | <FigStruct> | <Remarks> | <Sentence> | <Column>
+    
+    Returns:
+        str: HTMLセル内容（改行を<br>タグで表現）
+    """
+    if col_elem is None:
+        return ""
+    
+    parts = []
+    
+    # 子要素を順次処理
+    for child in col_elem:
+        tag = child.tag
+        
+        if tag == "Sentence":
+            # Sentence要素は改行区切りで使われることが多い
+            text = normalize_text(extract_text(child))
+            if text:
+                parts.append(text)
+        
+        elif tag == "Column":
+            # Column要素も改行として扱う
+            for sentence in child.findall("Sentence"):
+                text = normalize_text(extract_text(sentence))
+                if text:
+                    parts.append(text)
+        
+        elif tag == "Item":
+            # 号（Item）の処理
+            item_num = child.get("Num", "")
+            item_label = convert_item_num(item_num) if item_num else ""
+            item_sent = child.find("ItemSentence")
+            if item_sent is not None:
+                sent_text = normalize_text(extract_text(item_sent))
+                parts.append(f"{item_label} {sent_text}")
+            # Itemの子要素（Subitem1など）も処理
+            for subitem_level in range(1, 11):
+                for subitem in child.findall(f"Subitem{subitem_level}"):
+                    subitem_text = process_subitem_in_table(subitem, subitem_level)
+                    if subitem_text:
+                        parts.append(subitem_text)
+        
+        elif tag == "Paragraph":
+            # 項の処理
+            p_num = child.get("Num", "1")
+            para_sent = child.find("ParagraphSentence")
+            if para_sent is not None:
+                sent_text = normalize_text(extract_text(para_sent))
+                parts.append(f"({p_num}) {sent_text}")
+        
+        elif tag == "Remarks":
+            # 備考の処理
+            remarks_text = process_remarks_in_table(child)
+            if remarks_text:
+                parts.append(remarks_text)
+        
+        elif tag == "FigStruct":
+            # 図の処理
+            fig = child.find("Fig")
+            if fig is not None:
+                fig_text = process_fig(fig)
+                if fig_text:
+                    parts.append(fig_text.strip())
+        
+        elif tag in ["Article", "Part", "Chapter", "Section", "Subsection", "Division"]:
+            # これらの構造要素は稀だが、スキーマ上は可能
+            # タイトルとテキストを取得
+            struct_text = normalize_text(extract_text(child))
+            if struct_text:
+                parts.append(struct_text)
+        
+        # Subitem1-10の直接出現にも対応
+        elif tag.startswith("Subitem") and tag[7:].isdigit():
+            level = int(tag[7:])
+            subitem_text = process_subitem_in_table(child, level)
+            if subitem_text:
+                parts.append(subitem_text)
+    
+    # テキストがなく、直接のテキストノードがある場合
+    if not parts:
+        direct_text = normalize_text(extract_text(col_elem))
+        if direct_text:
+            return direct_text
+    
+    # 改行で結合（HTML内なので<br>タグを使用）
+    return "<br>".join(parts) if parts else ""
+
+def process_subitem_in_table(subitem_elem, level):
+    """表内のSubitem要素を処理"""
+    if subitem_elem is None:
+        return ""
+    
+    num = subitem_elem.get("Num", "")
+    title_elem = subitem_elem.find(f"Subitem{level}Title")
+    sent_elem = subitem_elem.find(f"Subitem{level}Sentence")
+    
+    # インデント（レベルに応じて）
+    indent = "　" * level
+    
+    parts = []
+    if title_elem is not None:
+        title_text = normalize_text(extract_text(title_elem))
+        parts.append(f"{indent}{title_text}")
+    
+    if sent_elem is not None:
+        sent_text = normalize_text(extract_text(sent_elem))
+        parts.append(f"{indent}{sent_text}")
+    
+    return " ".join(parts)
+
+def process_remarks_in_table(remarks_elem):
+    """表内のRemarks要素を処理"""
+    if remarks_elem is None:
+        return ""
+    
+    parts = []
+    label = remarks_elem.find("RemarksLabel")
+    if label is not None:
+        label_text = normalize_text(extract_text(label))
+        parts.append(label_text)
+    
+    for item in remarks_elem.findall("Item"):
+        item_num = item.get("Num", "")
+        item_label = convert_item_num(item_num) if item_num else ""
+        item_sent = item.find("ItemSentence")
+        if item_sent is not None:
+            sent_text = normalize_text(extract_text(item_sent))
+            parts.append(f"{item_label} {sent_text}")
+    
+    for sentence in remarks_elem.findall("Sentence"):
+        sent_text = normalize_text(extract_text(sentence))
+        if sent_text:
+            parts.append(sent_text)
+    
+    return "<br>".join(parts)
+
 def process_quote_struct(quote_elem):
-    """引用構造を処理（Markdown引用ブロックとして表現）"""
+    """引用構造を処理（改行を維持）
+    
+    QuoteStructは「図として捉える改正」などで使用され、
+    改行が意味を持つ場合があります。normalize_textで改行を潰さず、
+    preタグまたは引用記法で改行を保持します。
+    """
     if quote_elem is None:
         return ""
-    # QuoteStruct内の全テキストを抽出して引用ブロックとして整形
-    # 複雑な構造の場合は再帰的に処理
-    content = ""
+    
+    # 改行を維持したままテキストを抽出
+    content_parts = []
     for child in quote_elem:
         if child.tag == "Sentence":
-            # normalize_textを使わずに直接extract_textを呼ぶ（二重正規化を避ける）
-            content += child.text or ""
-            for subchild in child:
-                content += (subchild.text or "") + (subchild.tail or "")
+            # Sentenceごとに改行
+            text = extract_text(child).strip()
+            if text:
+                content_parts.append(text)
+        elif child.tag == "Line":
+            text = extract_text(child).strip()
+            if text:
+                content_parts.append(text)
         else:
-            content += (child.text or "") + (child.tail or "")
-    return f"「{content.strip()}」"
+            # その他の要素
+            text = extract_text(child).strip()
+            if text:
+                content_parts.append(text)
+    
+    # 改行を保持してpreタグで表現
+    content = "\n".join(content_parts)
+    if content:
+        return f"```\n{content}\n```\n\n"
+    return ""
 
 def process_remarks(remarks_elem):
     """備考を処理"""
@@ -135,9 +353,9 @@ def process_remarks(remarks_elem):
         label_text = normalize_text(extract_text(label))
         line_break = label.get("LineBreak", "false") == "true"
         if line_break:
-            md += f" **{label_text} ** \n\n"
+            md += f"**{label_text}**\n\n"
         else:
-            md += f" **{label_text} ** \n"
+            md += f"**{label_text}**\n"
     
     # 備考の項目
     for item in remarks_elem.findall("Item"):
@@ -213,19 +431,64 @@ def extract_law_id_from_root(root):
 # NOTE: これらの関数は、メインの parse_to_markdown や他の処理関数から呼び出されます。
 
 def process_arith_formula(arith_formula):
+    """算式を処理（Num属性とテキスト）"""
     if arith_formula is None: return ""
+    
     formula_text = normalize_text(extract_text(arith_formula))
     if not formula_text: return ""
+    
+    # Num属性（算式番号）を取得
+    formula_num = arith_formula.get("Num", "")
+    num_label = f"（式{formula_num}）" if formula_num else ""
+    
+    # 複数行または長い式の場合はコードブロック、短い式はインライン
     if "\n" in formula_text or len(formula_text) > 100:
-        return f"```\n{formula_text}\n```\n\n"
+        return f"{num_label}\n```\n{formula_text}\n```\n\n"
     else:
-        return f"`{formula_text}`\n\n"
+        return f"{num_label} `{formula_text}`\n\n"
+
+def process_arith_formula_num(arith_formula_num):
+    """算式番号を処理"""
+    if arith_formula_num is None: return ""
+    text = normalize_text(extract_text(arith_formula_num))
+    if not text: return ""
+    return f"**{text}**\n\n"
 
 def process_fig(fig):
+    """図を処理（src属性で画像参照、またはテキスト説明）
+    
+    画像が含まれる場合、e-Gov APIから自動的にダウンロードして保存します。
+    """
+    if fig is None: return ""
+    
     src = fig.get("src", "")
     alt = normalize_text(extract_text(fig))
-    if src: return f"![{alt}]({src})\n\n"
-    return f"*[図: {alt}]*\n\n"
+    
+    if src:
+        # 画像をダウンロード（DOWNLOAD_IMAGES=Trueの場合）
+        if DOWNLOAD_IMAGES and CURRENT_LAW_REVISION_ID and CURRENT_IMAGE_DIR:
+            local_path = download_image_from_api(
+                CURRENT_LAW_REVISION_ID,
+                src,
+                CURRENT_IMAGE_DIR
+            )
+            
+            if local_path:
+                # ダウンロード成功 - ローカルパスを使用
+                return f"![{alt}]({local_path})\n\n"
+            else:
+                # ダウンロード失敗 - 元のパスを使用（警告付き）
+                print(f"[警告] 画像参照: {src} (ダウンロード失敗、元のパスを使用)")
+                return f"![{alt}]({src})\n\n"
+        else:
+            # 画像ダウンロードが無効、または必要な情報がない場合
+            return f"![{alt}]({src})\n\n"
+    elif alt:
+        # src がない場合は説明テキストとして出力
+        return f"*[図: {alt}]*\n\n"
+    else:
+        # テキストもない場合は最小出力
+        return f"*[図]*\n\n"
 
 def process_fig_struct(fs):
     title = fs.find("FigStructTitle")
@@ -316,7 +579,8 @@ def build_logical_table_grid(rows):
                 grid_col_idx += 1
             
             if grid_col_idx < max_cols:
-                col_text = normalize_text(extract_text(col))
+                # ✨ 改善: TableColumn内の構造要素を処理
+                col_text = process_table_column_content(col)
                 rowspan = int(col.get('rowspan', 1))
                 colspan = int(col.get('colspan', 1))
                 bt = col.get('BorderTop', 'solid')
@@ -412,12 +676,45 @@ def calculate_rowspan_from_border(table, row_idx, col_idx, body_rows, cell):
     
     return rowspan
 
+def _check_table_has_non_solid_border(table, header, body_rows):
+    """✨ NEW: テーブル内に solid 以外の border-style があるかを確認
+    
+    Args:
+        table: Table要素
+        header: TableHeaderRow要素（None可）
+        body_rows: TableRow要素のリスト
+    
+    Returns:
+        bool: True = solid以外あり（スタイル指定必要）、False = 全てsolid（スタイル指定不要）
+    """
+    # ヘッダーセルをチェック
+    if header is not None:
+        for col in header.findall("TableHeaderColumn"):
+            for border_attr in ["BorderTop", "BorderBottom", "BorderLeft", "BorderRight"]:
+                border_val = col.get(border_attr, "solid")
+                if border_val != "solid":
+                    return True
+    
+    # ボディセルをチェック
+    for row in body_rows:
+        for col in row.findall("TableColumn"):
+            for border_attr in ["BorderTop", "BorderBottom", "BorderLeft", "BorderRight"]:
+                border_val = col.get(border_attr, "solid")
+                if border_val != "solid":
+                    return True
+    
+    # 全て solid
+    return False
+
 def render_table(table, indent):
     """
     テーブルをHTMLにレンダリング
     
     提供されたプログラム例を参考に、Border属性を考慮した論理的なグリッド処理を実装。
     見た目上つながっているが論理的には連結されていないセルを正確に処理。
+    
+    ✨ 改善: テーブル内の全セルの border-style が "solid" の場合はスタイル指定を一切しない。
+    1セルでも "none" | "dotted" | "double" があれば全セルに対してスタイル指定を行う。
     """
     indent_str = "  " * indent
     html_lines = []
@@ -432,13 +729,17 @@ def render_table(table, indent):
     header = table.find("TableHeaderRow")
     body_rows = list(table.findall("TableRow"))
     
+    # ✨ NEW: テーブル内の全セルをスキャンして、solid 以外の border-style があるかを確認
+    has_non_solid_border = _check_table_has_non_solid_border(table, header, body_rows)
+    
     # ヘッダーセルの処理
     if header is not None:
         html_lines.append(f"{indent_str}  <thead>")
         html_lines.append(f"{indent_str}    <tr>")
         for header_col in header.findall("TableHeaderColumn"):
+            # ヘッダーセルは構造が単純なので従来通り
             col_text = normalize_text(extract_text(header_col))
-            attrs = get_cell_attributes(header_col, "th")
+            attrs = get_cell_attributes(header_col, "th", enable_border_style=has_non_solid_border)
             html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
         html_lines.append(f"{indent_str}    </tr>")
         html_lines.append(f"{indent_str}  </thead>")
@@ -447,8 +748,9 @@ def render_table(table, indent):
         html_lines.append(f"{indent_str}  <thead>")
         html_lines.append(f"{indent_str}    <tr>")
         for col in body_rows[0].findall("TableColumn"):
-            col_text = normalize_text(extract_text(col))
-            attrs = get_cell_attributes(col, "th")
+            # ✨ 改善: ヘッダーでも構造要素を処理
+            col_text = process_table_column_content(col)
+            attrs = get_cell_attributes(col, "th", enable_border_style=has_non_solid_border)
             html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
         html_lines.append(f"{indent_str}    </tr>")
         html_lines.append(f"{indent_str}  </thead>")
@@ -486,22 +788,22 @@ def render_table(table, indent):
                     if colspan > 1:
                         attrs.append(f'colspan="{colspan}"')
                     
-                    # Border スタイルをCSSに変換
-                    style_parts = []
-                    border_map = {
-                        'bt': 'border-top-style',
-                        'bb': 'border-bottom-style'
-                    }
-                    for border_key, css_prop in border_map.items():
-                        border_val = cell.get(border_key, 'solid')
-                        if border_val:
-                            style_parts.append(f"{css_prop}: {border_val}")
-                    
-                    # align/valign 属性は XMLに記載されていないため、セルの内容から推定することは難しいが
-                    # 必要に応じて後で追加可能
-                    
-                    if style_parts:
-                        attrs.append(f'style="{"; ".join(style_parts)}"')
+                    # ✨ 改善: has_non_solid_border フラグに基づいてスタイル出力を制御
+                    if has_non_solid_border:
+                        # Border スタイルをCSSに変換
+                        style_parts = []
+                        border_map = {
+                            'bt': 'border-top-style',
+                            'bb': 'border-bottom-style'
+                        }
+                        for border_key, css_prop in border_map.items():
+                            border_val = cell.get(border_key, 'solid')
+                            if border_val:
+                                style_parts.append(f"{css_prop}: {border_val}")
+                        
+                        if style_parts:
+                            attrs.append(f'style="{"; ".join(style_parts)}"')
+                    # else: solid のみの場合はスタイル指定しない
                     
                     attrs_str = " " + " ".join(attrs) if attrs else ""
                     html_lines.append(f'{indent_str}      <td{attrs_str}>{col_text}</td>')
@@ -514,7 +816,7 @@ def render_table(table, indent):
     
     return "\n".join(html_lines) + "\n\n"
 
-def get_cell_attributes(cell, cell_type="td", rowspan_override=None):
+def get_cell_attributes(cell, cell_type="td", rowspan_override=None, enable_border_style=True):
     """テーブルセルの属性をHTMLのstyle属性に変換
     
     枠線のBorder属性を CSS border-*-style に変換することで、
@@ -524,6 +826,7 @@ def get_cell_attributes(cell, cell_type="td", rowspan_override=None):
         cell: XML要素
         cell_type: "td" または "th"
         rowspan_override: 計算されたrowspan値（指定時はXML属性を上書き）
+        enable_border_style: border-style をスタイル属性に含めるかどうか（デフォルト: True）
     """
     attrs = []
     
@@ -547,19 +850,21 @@ def get_cell_attributes(cell, cell_type="td", rowspan_override=None):
     
     style_parts = []
     
-    # 枠線スタイル（Border属性をCSS border-*-styleに変換）
-    border_map = {
-        "BorderTop": "border-top-style",
-        "BorderBottom": "border-bottom-style",
-        "BorderLeft": "border-left-style",
-        "BorderRight": "border-right-style"
-    }
-    
-    for border_attr, css_prop in border_map.items():
-        border_value = cell.get(border_attr)
-        if border_value:
-            # solid, none, dotted, double をそのままCSS値として使用
-            style_parts.append(f"{css_prop}: {border_value}")
+    # ✨ 改善: enable_border_style フラグに基づいて border-style を出力するかを制御
+    if enable_border_style:
+        # 枠線スタイル（Border属性をCSS border-*-styleに変換）
+        border_map = {
+            "BorderTop": "border-top-style",
+            "BorderBottom": "border-bottom-style",
+            "BorderLeft": "border-left-style",
+            "BorderRight": "border-right-style"
+        }
+        
+        for border_attr, css_prop in border_map.items():
+            border_value = cell.get(border_attr)
+            if border_value:
+                # solid, none, dotted, double をそのままCSS値として使用
+                style_parts.append(f"{css_prop}: {border_value}")
     
     # テキスト配置
     if align:
@@ -662,6 +967,16 @@ def render_item_sentence(item_sent, indent_level, label, title):
         md += "\n" + render_table(t, indent_level)
     return md
 
+def process_column(column):
+    """Column要素を処理（通常は ItemSentence 内で使用）"""
+    if column is None: return ""
+    # 複数の Column がある場合は用語-定義形式
+    sentences = column.findall("Sentence")
+    if sentences:
+        return "".join([normalize_text(extract_text(s)) for s in sentences])
+    else:
+        return normalize_text(extract_text(column))
+
 def process_child_elements(parent, indent):
     md = ""
     for list_elem in parent.findall("List"): md += process_list(list_elem, indent)
@@ -673,6 +988,11 @@ def process_child_elements(parent, indent):
     for ns in parent.findall("NoteStruct"): md += "\n" + process_note_struct(ns)
     for fs in parent.findall("FormatStruct"): md += "\n" + process_format_struct(fs)
     for cls in parent.findall("Class"): md += "\n" + process_class(cls)
+    # Column 要素（独立している場合）も処理
+    for col in parent.findall("Column"):
+        col_text = process_column(col)
+        if col_text:
+            md += f"{col_text}\n\n"
     return md
 
 def process_item(item, indent_level):
@@ -801,24 +1121,233 @@ def process_appdx_table(elem):
         md += process_item(item, 0)
     
     return md
-def process_appdx_note(elem): return _appdx_common(elem)
-def process_appdx_style(elem): return _appdx_common(elem)
-def process_appdx_format(elem): return _appdx_common(elem)
-def process_appdx_fig(elem): return process_fig_struct(elem.find("FigStruct")) if elem.find("FigStruct") is not None else ""
-def process_appdx(elem): return _appdx_common(elem)
+
+def process_appdx_note(elem): 
+    """別記を処理"""
+    return _appdx_common(elem)
+
+def process_appdx_style(elem): 
+    """別記様式を処理"""
+    return _appdx_common(elem)
+
+def process_appdx_format(elem): 
+    """別記書式を処理"""
+    return _appdx_common(elem)
+
+def process_appdx_fig(elem): 
+    """別図を処理"""
+    if elem is None: return ""
+    # FigStructを処理
+    fig_struct = elem.find("FigStruct")
+    if fig_struct is not None:
+        return process_fig_struct(fig_struct)
+    # FigStruct がない場合は相互参照を処理
+    md = ""
+    title = elem.find("AppdxFigTitle")
+    if title is not None:
+        md += f"## {normalize_text(extract_text(title))}\n\n"
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    return md if md else ""
+
+def process_appdx(elem): 
+    """付録を処理（算式などを含む）"""
+    if elem is None: return ""
+    md = ""
+    # ArithFormulaNum（算式番号）を処理
+    for arith_num in elem.findall("ArithFormulaNum"):
+        md += process_arith_formula_num(arith_num)
+    # RelatedArticleNum（関係条文番号）を処理
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    # ArithFormula（算式）を処理
+    for arith in elem.findall("ArithFormula"):
+        md += process_arith_formula(arith)
+    # Remarks（備考）を処理
+    for remarks in elem.findall("Remarks"):
+        remarks_text = process_remarks(remarks)
+        if remarks_text:
+            md += f"{remarks_text}\n\n"
+    return md
+
+def process_suppl_provision_appdx_table(elem):
+    """附則別表を処理"""
+    if elem is None: return ""
+    md = ""
+    title = elem.find("SupplProvisionAppdxTableTitle")
+    if title is not None:
+        md += f"## {normalize_text(extract_text(title))}\n\n"
+    # RelatedArticleNum（関係条文番号）を処理
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    # TableStruct を処理
+    for ts in elem.findall("TableStruct"):
+        md += render_table_struct(ts, 0)
+    return md
+
+def process_suppl_provision_appdx_style(elem):
+    """附則様式を処理"""
+    if elem is None: return ""
+    md = ""
+    title = elem.find("SupplProvisionAppdxStyleTitle")
+    if title is not None:
+        md += f"## {normalize_text(extract_text(title))}\n\n"
+    # RelatedArticleNum（関係条文番号）を処理
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    # StyleStruct を処理
+    for ss in elem.findall("StyleStruct"):
+        md += process_style_struct(ss)
+    return md
+
+def process_suppl_provision_appdx(elem):
+    """附則付録を処理（算式などを含む）"""
+    if elem is None: return ""
+    md = ""
+    # ArithFormulaNum（算式番号）を処理
+    for arith_num in elem.findall("ArithFormulaNum"):
+        md += process_arith_formula_num(arith_num)
+    # RelatedArticleNum（関係条文番号）を処理
+    for rel_art in elem.findall("RelatedArticleNum"):
+        rel_text = normalize_text(extract_text(rel_art))
+        if rel_text:
+            md += f"*{rel_text}*\n\n"
+    # ArithFormula（算式）を処理
+    for arith in elem.findall("ArithFormula"):
+        md += process_arith_formula(arith)
+    return md
 
 # --- 構造要素処理関数 (Part, Chapter, Articleなど) ---
 
 def process_amend_provision(xml_root):
+    """改正規定を処理（NewProvision内の全構造要素に対応）
+    
+    NewProvisionはスキーマ上、以下の要素を含むことができます:
+    <LawTitle> | <Preamble> | <TOC> | <Part> | <Chapter> | <Section> | 
+    <Subsection> | <Division> | <Article> | <Paragraph> | <Item> | など
+    
+    これらを適切に処理して改正内容を出力します。
+    """
     amend_provs = xml_root.findall(".//AmendProvision")
     if not amend_provs: return ""
+    
     md = "# 改正規定\n\n"
+    
     for amend_prov in amend_provs:
-        name = amend_prov.find("AmendLawName")
-        if name is not None:
-            md += f"## {normalize_text(extract_text(name))}\n\n"
-        for article in amend_prov.findall("Article"):
-            md += process_article(article, 3)
+        # 改正規定文の処理
+        for amend_sent in amend_prov.findall("AmendProvisionSentence"):
+            for sentence in amend_sent.findall("Sentence"):
+                text = normalize_text(extract_text(sentence))
+                if text:
+                    md += f"{text}\n\n"
+        
+        # NewProvision内の構造要素を処理
+        for new_prov in amend_prov.findall("NewProvision"):
+            md += process_new_provision(new_prov)
+    
+    return md
+
+def process_new_provision(new_prov):
+    """NewProvision（改正規定中の新規条文）を処理
+    
+    NewProvisionには法令本体と同様の構造が含まれるため、
+    構造要素を順次処理します。
+    """
+    md = ""
+    
+    # LawTitle（法令名の改正の場合）
+    law_title = new_prov.find("LawTitle")
+    if law_title is not None:
+        title_text = normalize_text(extract_text(law_title))
+        md += f"## {title_text}\n\n"
+    
+    # Preamble（前文）
+    preamble = new_prov.find("Preamble")
+    if preamble is not None:
+        md += "### 前文\n\n"
+        for para in preamble.findall("Paragraph"):
+            para_text = normalize_text(extract_text(para))
+            md += f"{para_text}\n\n"
+    
+    # 構造要素（Part, Chapter, Section など）
+    for part in new_prov.findall("Part"):
+        md += process_structure_element(part, 2)
+    
+    for chapter in new_prov.findall("Chapter"):
+        md += process_structure_element(chapter, 2)
+    
+    for section in new_prov.findall("Section"):
+        md += process_structure_element(section, 3)
+    
+    for subsection in new_prov.findall("Subsection"):
+        md += process_structure_element(subsection, 4)
+    
+    for division in new_prov.findall("Division"):
+        md += process_structure_element(division, 4)
+    
+    # Article（条）
+    for article in new_prov.findall("Article"):
+        md += process_article(article, 3)
+    
+    # Paragraph（項）- Article外の直接出現
+    for para in new_prov.findall("Paragraph"):
+        md += process_single_paragraph(para, 1)
+    
+    # Item（号）- Paragraph外の直接出現
+    for item in new_prov.findall("Item"):
+        md += process_item(item, 1)
+    
+    # TableStruct（表）
+    for table_struct in new_prov.findall("TableStruct"):
+        md += render_table_struct(table_struct, 0)
+    
+    # FigStruct（図）
+    for fig_struct in new_prov.findall("FigStruct"):
+        md += process_fig_struct(fig_struct)
+    
+    # StyleStruct（様式）
+    for style_struct in new_prov.findall("StyleStruct"):
+        md += process_style_struct(style_struct)
+    
+    # NoteStruct（記）
+    for note_struct in new_prov.findall("NoteStruct"):
+        md += process_note_struct(note_struct)
+    
+    # FormatStruct（書式）
+    for format_struct in new_prov.findall("FormatStruct"):
+        md += process_format_struct(format_struct)
+    
+    # Remarks（備考）
+    for remarks in new_prov.findall("Remarks"):
+        md += process_remarks(remarks)
+    
+    # 別表等
+    for appdx_table in new_prov.findall("AppdxTable"):
+        md += process_appdx_table(appdx_table)
+    
+    for appdx_note in new_prov.findall("AppdxNote"):
+        md += process_appdx_note(appdx_note)
+    
+    for appdx_style in new_prov.findall("AppdxStyle"):
+        md += process_appdx_style(appdx_style)
+    
+    for appdx in new_prov.findall("Appdx"):
+        md += process_appdx(appdx)
+    
+    for appdx_fig in new_prov.findall("AppdxFig"):
+        md += process_appdx_fig(appdx_fig)
+    
+    for appdx_format in new_prov.findall("AppdxFormat"):
+        md += process_appdx_format(appdx_format)
+    
     return md
 
 def process_single_paragraph(para, total_p):
@@ -1033,6 +1562,27 @@ def extract_suppl_provision(xml_root):
                 md += f"- {normalize_text(extract_text(sent))}\n"
     
     md += process_all_appdx(suppl)
+    
+    # 附則別表を処理
+    suppl_appdx_tables = suppl.findall("SupplProvisionAppdxTable")
+    if suppl_appdx_tables:
+        md += "## 附則別表\n\n"
+        for table in suppl_appdx_tables:
+            md += process_suppl_provision_appdx_table(table)
+    
+    # 附則様式を処理
+    suppl_appdx_styles = suppl.findall("SupplProvisionAppdxStyle")
+    if suppl_appdx_styles:
+        md += "## 附則様式\n\n"
+        for style in suppl_appdx_styles:
+            md += process_suppl_provision_appdx_style(style)
+    
+    # 附則付録を処理
+    suppl_appdxs = suppl.findall("SupplProvisionAppdx")
+    if suppl_appdxs:
+        md += "## 附則付録\n\n"
+        for appdx in suppl_appdxs:
+            md += process_suppl_provision_appdx(appdx)
 
     return md
 
@@ -1338,7 +1888,11 @@ def parse_to_markdown(xml_content, law_name_override=None):
 # ==========================================
 
 def fetch_law_data(law_name, asof_date=None):
-    """e-Gov API v2から法令XMLを取得"""
+    """e-Gov API v2から法令XMLを取得
+    
+    Returns:
+        tuple: (xml_data, law_revision_id) または (None, None)
+    """
     print(f"[{law_name}] を検索中... (API v2)")
     try:
         laws_url = "https://laws.e-gov.go.jp/api/2/laws"
@@ -1352,6 +1906,7 @@ def fetch_law_data(law_name, asof_date=None):
         data = response.json()
         
         law_id = None
+        law_revision_id = None
         found_title = ""
         
         if data.get("laws"):
@@ -1360,18 +1915,20 @@ def fetch_law_data(law_name, asof_date=None):
                 title = revision.get("law_title", "")
                 if title == law_name:
                     law_id = law["law_info"]["law_id"]
+                    law_revision_id = revision.get("law_revision_id")
                     found_title = title
                     break
             
             if not law_id and len(data["laws"]) > 0:
                 law = data["laws"][0]
                 law_id = law["law_info"]["law_id"]
+                law_revision_id = law["revision_info"].get("law_revision_id")
                 found_title = law["revision_info"]["law_title"]
                 print(f"完全一致が見つからないため、'{found_title}' を取得します。")
 
         if not law_id:
             print(f"Error: '{law_name}' が見つかりませんでした。")
-            return None
+            return None, None
 
         data_url = f"https://laws.e-gov.go.jp/api/2/law_data/{law_id}"
         data_params = {"response_format": "xml"}
@@ -1385,14 +1942,16 @@ def fetch_law_data(law_name, asof_date=None):
         law_response = requests.get(data_url, params=data_params, timeout=30)
         law_response.raise_for_status()
         
-        return law_response.content
+        print(f"[法令履歴ID] {law_revision_id}")
+        
+        return law_response.content, law_revision_id
         
     except requests.exceptions.RequestException as e:
         print(f"通信エラーが発生しました: {e}")
-        return None
+        return None, None
     except ET.ParseError:
         print("XMLの解析に失敗しました。")
-        return None
+        return None, None
 
 def load_xml_from_file(file_path):
     """XMLファイルを読み込む"""
@@ -1411,12 +1970,18 @@ def load_xml_from_file(file_path):
 
 def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None, law_id=None, enforcement_date=None):
     """ファイルを保存し、既存ファイルがあれば上書き確認"""
+    global CURRENT_IMAGE_DIR
+    
     safe_law_name = "".join(c for c in law_name if c not in '<>:"/\\|?*')
     date_suffix = f"_{enforcement_date.replace('-', '')}" if enforcement_date else ""
     
     output_dir = "output_Markdown"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    
+    # 画像保存ディレクトリを設定
+    image_dir_name = f"{safe_law_name}{date_suffix}_images"
+    CURRENT_IMAGE_DIR = os.path.join(output_dir, image_dir_name)
     
     filename = os.path.join(output_dir, f"{safe_law_name}{date_suffix}.md")
     
@@ -1445,11 +2010,20 @@ def save_markdown_file(law_name, md_output, force_overwrite=False, abbrev=None, 
 
 def process_from_api(law_name, force=False, asof_date=None):
     """APIから法令を取得して保存"""
-    xml_data = fetch_law_data(law_name, asof_date)
+    global CURRENT_LAW_REVISION_ID, CURRENT_IMAGE_DIR
+    
+    xml_data, law_revision_id = fetch_law_data(law_name, asof_date)
     if xml_data:
+        # グローバル変数に法令履歴IDを設定
+        CURRENT_LAW_REVISION_ID = law_revision_id
+        
         md_output, real_law_name, abbrev, law_id, enforcement_date = parse_to_markdown(xml_data, law_name)
         if md_output:
             save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev, law_id=law_id, enforcement_date=enforcement_date)
+        
+        # 処理後にクリア
+        CURRENT_LAW_REVISION_ID = None
+        CURRENT_IMAGE_DIR = None
 
 def process_from_file(file_path, force=False):
     """ローカルファイルから変換して保存"""
@@ -1515,17 +2089,22 @@ def main():
     parser.add_argument("--table-mode", choices=["hybrid", "strict"], default="hybrid", 
                         help="テーブル処理モード: hybrid(Border属性から推測) または strict(rowspan属性のみ) [デフォルト: hybrid]")
     parser.add_argument("--table-debug", action="store_true", help="テーブルrowspan計算のデバッグログを出力")
+    parser.add_argument("--no-images", action="store_true", help="画像の自動ダウンロードを無効化")
     
     args = parser.parse_args()
     
     # グローバル変数を引数から設定
-    global TABLE_PROCESSING_MODE, TABLE_ROWSPAN_DEBUG
+    global TABLE_PROCESSING_MODE, TABLE_ROWSPAN_DEBUG, DOWNLOAD_IMAGES
     TABLE_PROCESSING_MODE = args.table_mode
     TABLE_ROWSPAN_DEBUG = args.table_debug
+    DOWNLOAD_IMAGES = not args.no_images  # --no-imagesが指定されていない場合はTrue
     
     if TABLE_ROWSPAN_DEBUG:
         print(f"[デバッグ] TABLE_PROCESSING_MODE={TABLE_PROCESSING_MODE}")
         print(f"[デバッグ] TABLE_ROWSPAN_DEBUG=True")
+    
+    if not DOWNLOAD_IMAGES:
+        print(f"[設定] 画像の自動ダウンロード: 無効")
 
     if args.law:
         process_from_api(args.law, force=True, asof_date=args.asof)
