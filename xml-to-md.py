@@ -19,8 +19,8 @@ TABLE_PROCESSING_MODE = "hybrid"
 # ログ出力設定（トラブル診断用）
 TABLE_ROWSPAN_DEBUG = False
 
-# 画像ダウンロード設定
-DOWNLOAD_IMAGES = True  # 画像を自動ダウンロードするかどうか
+# 画像処理設定
+DOWNLOAD_IMAGES = True  # 画像を自動ダウンロードするかどうか（False=直リンク）
 
 # ==========================================
 # ユーティリティ関数
@@ -590,6 +590,16 @@ def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
                     return f"![{alt}]({src})\n\n"
         else:
             # 画像ダウンロードが無効、または必要な情報がない場合
+            # law_revision_idがあれば直リンクを生成
+            if law_revision_id:
+                image_url = build_attachment_url(law_revision_id, src)
+                if image_url:
+                    if is_in_table:
+                        return f'<img src="{image_url}" alt="{alt}" />'
+                    else:
+                        return f"![{alt}]({image_url})\n\n"
+            
+            # law_revision_idがない場合は元のパス
             if is_in_table:
                 return f'<img src="{src}" alt="{alt}" />'
             else:
@@ -1991,7 +2001,7 @@ def extract_law_metadata(root, revision_meta=None):
     try:
         lid = extract_law_id_from_root(root)
         if lid:
-            md += f"**法令ID**: {lid}\n\n"
+            md += f"{lid}\n\n"
     except Exception:
         pass
     if law is not None:
@@ -2002,13 +2012,7 @@ def extract_law_metadata(root, revision_meta=None):
         
         era_map = {"Meiji":"明治", "Taisho":"大正", "Showa":"昭和", "Heisei":"平成", "Reiwa":"令和"}
         type_map = {"Act":"法律", "CabinetOrder":"政令", "MinisterialOrdinance":"省令", "Rule":"規則", "Constitution":"憲法"}
-        
-        if era and year and num:
-            if ltype == "Constitution":
-                md += f"**法令番号**: {era_map.get(era, era)}{year}年 憲法\n\n"
-            else:
-                md += f"**法令番号**: {era_map.get(era, era)}{year}年{type_map.get(ltype, ltype)}第{num}号\n\n"
-        
+
         pm = law.get("PromulgateMonth", "")
         pd = law.get("PromulgateDay", "")
         if pm or pd:
@@ -2063,7 +2067,7 @@ def extract_law_metadata(root, revision_meta=None):
 # Main Parser
 # ==========================================
 
-def parse_to_markdown(xml_content, law_name_override=None, law_revision_id=None, image_dir=None):
+def parse_to_markdown(xml_content, law_name_override=None, law_revision_id=None, image_dir=None, law_id_override=None):
     """XMLバイナリデータをMarkdown文字列に変換
     
     Args:
@@ -2071,6 +2075,7 @@ def parse_to_markdown(xml_content, law_name_override=None, law_revision_id=None,
         law_name_override: 法令名の上書き
         law_revision_id: 法令履歴ID（画像ダウンロード用）
         image_dir: 画像保存先ディレクトリ
+        law_id_override: APIから取得した法令ID（省略可）
     """
     try:
         root = ET.fromstring(xml_content)
@@ -2118,9 +2123,29 @@ def parse_to_markdown(xml_content, law_name_override=None, law_revision_id=None,
     except Exception:
         abbrev = ""
 
-    law_id = extract_law_id_from_root(root)
+    law_id = law_id_override if law_id_override else extract_law_id_from_root(root)
 
     markdown_text = f"# {law_name}\n\n"
+    
+    # e-Gov法令ページURLを追加
+    if law_id and enforcement_date:
+        # 改正法の施行日と法令IDをURLに含める（法令履歴ID形式）
+        enforcement_date_formatted = enforcement_date.replace('-', '')
+        if law_revision_id:
+            # law_revision_idから改正法の情報を抽出（例: 335M50000002060_20251001_507M60000002081）
+            parts = law_revision_id.split('_')
+            if len(parts) == 3:
+                amendment_law_id = parts[2]
+                law_url = f"https://laws.e-gov.go.jp/law/{law_id}/{enforcement_date_formatted}_{amendment_law_id}"
+            else:
+                law_url = f"https://laws.e-gov.go.jp/law/{law_id}"
+        else:
+            law_url = f"https://laws.e-gov.go.jp/law/{law_id}"
+        markdown_text += f"**e-Gov法令ページ**: <{law_url}>\n\n"
+    elif law_id:
+        law_url = f"https://laws.e-gov.go.jp/law/{law_id}"
+        markdown_text += f"**e-Gov法令ページ**: <{law_url}>\n\n"
+    
     # CSS スタイルを先頭に追加（テーブルの枠線表示用）
     # markdown_text += get_table_css_style()
     # cssスタイルは外部で追加する場合があるためコメントアウト
@@ -2165,7 +2190,7 @@ def fetch_law_data(law_name, asof_date=None):
     """e-Gov API v2から法令XMLを取得
     
     Returns:
-        tuple: (xml_data, law_revision_id) または (None, None)
+        tuple: (xml_data, law_revision_id, law_id) または (None, None, None)
     """
     print(f"[{law_name}] を検索中... (API v2)")
     try:
@@ -2202,7 +2227,7 @@ def fetch_law_data(law_name, asof_date=None):
 
         if not law_id:
             print(f"Error: '{law_name}' が見つかりませんでした。")
-            return None, None
+            return None, None, None
 
         data_url = f"https://laws.e-gov.go.jp/api/2/law_data/{law_id}"
         data_params = {"response_format": "xml"}
@@ -2218,11 +2243,11 @@ def fetch_law_data(law_name, asof_date=None):
         
         print(f"[法令履歴ID] {law_revision_id}")
         
-        return law_response.content, law_revision_id
+        return law_response.content, law_revision_id, law_id
         
     except requests.exceptions.RequestException as e:
         print(f"通信エラーが発生しました: {e}")
-        return None, None
+        return None, None, None
     except ET.ParseError:
         print("XMLの解析に失敗しました。")
         return None, None
@@ -2294,7 +2319,7 @@ def process_from_api(law_name, force=False, asof_date=None):
         force: 強制上書きフラグ
         asof_date: 時点指定（YYYY-MM-DD形式）
     """
-    xml_data, law_revision_id = fetch_law_data(law_name, asof_date)
+    xml_data, law_revision_id, api_law_id = fetch_law_data(law_name, asof_date)
     if xml_data:
         # 画像保存ディレクトリを準備
         # まず一時的にパースして法令名と施行日を取得
@@ -2315,7 +2340,7 @@ def process_from_api(law_name, force=False, asof_date=None):
         image_dir = os.path.join(output_dir, image_dir_name)
         
         # 最終的なMarkdownを生成（law_revision_idとimage_dirを渡す）
-        md_output, real_law_name, abbrev, law_id, enforcement_date = parse_to_markdown(xml_data, law_name, law_revision_id, image_dir)
+        md_output, real_law_name, abbrev, law_id, enforcement_date = parse_to_markdown(xml_data, law_name, law_revision_id, image_dir, api_law_id)
         if md_output:
             save_markdown_file(real_law_name, md_output, force_overwrite=force, abbrev=abbrev, law_id=law_id, enforcement_date=enforcement_date, image_dir=image_dir)
 
@@ -2383,7 +2408,11 @@ def main():
     parser.add_argument("--table-mode", choices=["hybrid", "strict"], default="hybrid", 
                         help="テーブル処理モード: hybrid(Border属性から推測) または strict(rowspan属性のみ) [デフォルト: hybrid]")
     parser.add_argument("--table-debug", action="store_true", help="テーブルrowspan計算のデバッグログを出力")
-    parser.add_argument("--no-images", action="store_true", help="画像の自動ダウンロードを無効化")
+    
+    # 画像処理オプション（相互排他）
+    image_group = parser.add_mutually_exclusive_group()
+    image_group.add_argument("--download-images", action="store_true", help="画像をダウンロードして埋め込む（デフォルト）")
+    image_group.add_argument("--link-images", action="store_true", help="画像をダウンロードせず、e-Gov直リンクのみ提供")
     
     args = parser.parse_args()
     
@@ -2391,14 +2420,22 @@ def main():
     global TABLE_PROCESSING_MODE, TABLE_ROWSPAN_DEBUG, DOWNLOAD_IMAGES
     TABLE_PROCESSING_MODE = args.table_mode
     TABLE_ROWSPAN_DEBUG = args.table_debug
-    DOWNLOAD_IMAGES = not args.no_images  # --no-imagesが指定されていない場合はTrue
+    
+    # 画像処理設定（デフォルトはダウンロード）
+    if args.link_images:
+        DOWNLOAD_IMAGES = False
+    elif args.download_images:
+        DOWNLOAD_IMAGES = True
+    # それ以外（どちらも指定なし）はデフォルトのTrueを維持
     
     if TABLE_ROWSPAN_DEBUG:
         print(f"[デバッグ] TABLE_PROCESSING_MODE={TABLE_PROCESSING_MODE}")
         print(f"[デバッグ] TABLE_ROWSPAN_DEBUG=True")
     
     if not DOWNLOAD_IMAGES:
-        print(f"[設定] 画像の自動ダウンロード: 無効")
+        print(f"[設定] 画像処理: e-Gov直リンクのみ（ダウンロードなし）")
+    else:
+        print(f"[設定] 画像処理: ダウンロードして埋め込み")
 
     if args.law:
         process_from_api(args.law, force=True, asof_date=args.asof)
