@@ -539,6 +539,9 @@ def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
     alt = normalize_text(extract_text(fig))
     
     if src:
+        _, ext = os.path.splitext(src)
+        ext_lower = ext.lower()
+        is_pdf = ext_lower == ".pdf"
         # 画像をダウンロード（DOWNLOAD_IMAGES=Trueの場合）
         if DOWNLOAD_IMAGES and law_revision_id and image_dir:
             local_path = download_image_from_api(
@@ -550,22 +553,40 @@ def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
             if local_path:
                 # ダウンロード成功 - ローカルパスを使用
                 if is_in_table:
-                    # HTMLテーブル内では<img>タグを使用
+                    # HTMLテーブル内ではPDFはリンク、それ以外は<img>タグ
+                    if is_pdf:
+                        link_text = alt if alt else "PDF"
+                        return f'<a href="{local_path}">{link_text}</a>'
                     return f'<img src="{local_path}" alt="{alt}" />'
                 else:
+                    if is_pdf:
+                        link_text = alt if alt else "PDF"
+                        return f"[{link_text}]({local_path})\n\n"
                     return f"![{alt}]({local_path})\n\n"
             else:
                 # ダウンロード失敗 - 元のパスを使用（警告付き）
                 print(f"[警告] 画像参照: {src} (ダウンロード失敗、元のパスを使用)")
                 if is_in_table:
+                    if is_pdf:
+                        link_text = alt if alt else "PDF"
+                        return f'<a href="{src}">{link_text}</a>'
                     return f'<img src="{src}" alt="{alt}" />'
                 else:
+                    if is_pdf:
+                        link_text = alt if alt else "PDF"
+                        return f"[{link_text}]({src})\n\n"
                     return f"![{alt}]({src})\n\n"
         else:
             # 画像ダウンロードが無効、または必要な情報がない場合
             if is_in_table:
+                if is_pdf:
+                    link_text = alt if alt else "PDF"
+                    return f'<a href="{src}">{link_text}</a>'
                 return f'<img src="{src}" alt="{alt}" />'
             else:
+                if is_pdf:
+                    link_text = alt if alt else "PDF"
+                    return f"[{link_text}]({src})\n\n"
                 return f"![{alt}]({src})\n\n"
     elif alt:
         # src がない場合は説明テキストとして出力
@@ -605,9 +626,18 @@ def _struct_common(elem, title_tag, mark, law_revision_id=None, image_dir=None):
         sent = para.find(".//Sentence")
         if sent is not None:
              md += f"{normalize_text(extract_text(sent))}\n\n"
-    for fig_struct in elem.findall("FigStruct"):
+
+    fig_structs = elem.findall(".//FigStruct")
+    fig_ids_in_struct = set()
+    for fig_struct in fig_structs:
         md += process_fig_struct(fig_struct, law_revision_id, image_dir)
-    for fig in elem.findall("Fig"):
+        fig = fig_struct.find("Fig")
+        if fig is not None:
+            fig_ids_in_struct.add(id(fig))
+
+    for fig in elem.findall(".//Fig"):
+        if id(fig) in fig_ids_in_struct:
+            continue
         md += process_fig(fig, law_revision_id, image_dir)
     return md
 
