@@ -5,6 +5,7 @@ import sys
 import argparse
 import glob
 import hashlib
+import urllib.parse
 from datetime import datetime
 
 # ==========================================
@@ -83,6 +84,22 @@ def download_image_from_api(law_revision_id, src_attr, image_dir):
     except Exception as e:
         print(f"[エラー] ダウンロード失敗: {filename} - {str(e)}")
         return None
+
+def build_attachment_url(law_revision_id, src_attr):
+    """e-Govの添付ファイル直リンクを生成（PDF用）
+
+    Args:
+        law_revision_id: 法令履歴ID
+        src_attr: Fig要素のsrc属性
+
+    Returns:
+        str | None: 直リンクURL（生成できない場合はNone）
+    """
+    if not law_revision_id or not src_attr:
+        return None
+    base_url = f"https://laws.e-gov.go.jp/api/2/attachment/{law_revision_id}"
+    encoded_src = urllib.parse.quote(src_attr, safe="/:.")
+    return f"{base_url}?src={encoded_src}"
 
 def normalize_text(text: str) -> str:
     """空白・改行を除去して1行にする"""
@@ -542,6 +559,14 @@ def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
         _, ext = os.path.splitext(src)
         ext_lower = ext.lower()
         is_pdf = ext_lower == ".pdf"
+
+        if is_pdf:
+            link_text = alt if alt else "PDF"
+            link_url = build_attachment_url(law_revision_id, src) or src
+            if is_in_table:
+                return f'<a href="{link_url}">{link_text}</a>'
+            return f"[{link_text}]({link_url})\n\n"
+
         # 画像をダウンロード（DOWNLOAD_IMAGES=Trueの場合）
         if DOWNLOAD_IMAGES and law_revision_id and image_dir:
             local_path = download_image_from_api(
@@ -553,40 +578,21 @@ def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
             if local_path:
                 # ダウンロード成功 - ローカルパスを使用
                 if is_in_table:
-                    # HTMLテーブル内ではPDFはリンク、それ以外は<img>タグ
-                    if is_pdf:
-                        link_text = alt if alt else "PDF"
-                        return f'<a href="{local_path}">{link_text}</a>'
                     return f'<img src="{local_path}" alt="{alt}" />'
                 else:
-                    if is_pdf:
-                        link_text = alt if alt else "PDF"
-                        return f"[{link_text}]({local_path})\n\n"
                     return f"![{alt}]({local_path})\n\n"
             else:
                 # ダウンロード失敗 - 元のパスを使用（警告付き）
                 print(f"[警告] 画像参照: {src} (ダウンロード失敗、元のパスを使用)")
                 if is_in_table:
-                    if is_pdf:
-                        link_text = alt if alt else "PDF"
-                        return f'<a href="{src}">{link_text}</a>'
                     return f'<img src="{src}" alt="{alt}" />'
                 else:
-                    if is_pdf:
-                        link_text = alt if alt else "PDF"
-                        return f"[{link_text}]({src})\n\n"
                     return f"![{alt}]({src})\n\n"
         else:
             # 画像ダウンロードが無効、または必要な情報がない場合
             if is_in_table:
-                if is_pdf:
-                    link_text = alt if alt else "PDF"
-                    return f'<a href="{src}">{link_text}</a>'
                 return f'<img src="{src}" alt="{alt}" />'
             else:
-                if is_pdf:
-                    link_text = alt if alt else "PDF"
-                    return f"[{link_text}]({src})\n\n"
                 return f"![{alt}]({src})\n\n"
     elif alt:
         # src がない場合は説明テキストとして出力
