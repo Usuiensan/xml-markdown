@@ -26,11 +26,11 @@ DOWNLOAD_IMAGES = True  # 画像を自動ダウンロードするかどうか
 # ==========================================
 
 def download_image_from_api(law_revision_id, src_attr, image_dir):
-    """e-Gov APIから画像をダウンロードして保存
+    """e-Gov APIから画像をダウンロードして保存（PNG/JPG/PDF対応）
     
     Args:
         law_revision_id: 法令履歴ID（例: 411AC0000000127_19990813_000000000000000）
-        src_attr: Fig要素のsrc属性（例: ./pict/H11HO127-001.jpg）
+        src_attr: Fig要素のsrc属性（例: ./pict/H11HO127-001.jpg または H11HO127-001.pdf）
         image_dir: 画像保存先ディレクトリ
     
     Returns:
@@ -45,6 +45,12 @@ def download_image_from_api(law_revision_id, src_attr, image_dir):
     # ファイル名を抽出（例: ./pict/H11HO127-001.jpg → H11HO127-001.jpg）
     filename = os.path.basename(src_attr)
     
+    # ファイル拡張子を確認（対応形式: jpg, jpeg, png, pdf, gif）
+    ext_lower = os.path.splitext(filename)[1].lower()
+    if ext_lower not in ['.jpg', '.jpeg', '.png', '.pdf', '.gif']:
+        print(f"[警告] 対応外のファイル形式: {filename}")
+        return None
+    
     # 保存先パス
     save_path = os.path.join(image_dir, filename)
     
@@ -53,7 +59,7 @@ def download_image_from_api(law_revision_id, src_attr, image_dir):
         print(f"[画像] 既存: {filename}")
         return os.path.join(os.path.basename(image_dir), filename)
     
-    # APIエンドポイント（修正版）
+    # APIエンドポイント
     api_url = f"https://laws.e-gov.go.jp/api/2/attachment/{law_revision_id}"
     params = {"src": src_attr}
     
@@ -62,7 +68,7 @@ def download_image_from_api(law_revision_id, src_attr, image_dir):
         response = requests.get(api_url, params=params, timeout=30)
         
         if response.status_code == 200:
-            # 画像を保存
+            # ファイルを保存
             with open(save_path, 'wb') as f:
                 f.write(response.content)
             print(f"[画像] 保存完了: {save_path}")
@@ -70,11 +76,12 @@ def download_image_from_api(law_revision_id, src_attr, image_dir):
             # 相対パスを返す（Markdownから参照するため）
             return os.path.join(os.path.basename(image_dir), filename)
         else:
-            print(f"[警告] 画像ダウンロード失敗: {filename} (HTTP {response.status_code})")
+            print(f"[警告] ダウンロード失敗: {filename} (HTTP {response.status_code})")
+            # エラー時でもスキップ済みにしないようにログのみ出力
             return None
     
     except Exception as e:
-        print(f"[エラー] 画像ダウンロード失敗: {filename} - {str(e)}")
+        print(f"[エラー] ダウンロード失敗: {filename} - {str(e)}")
         return None
 
 def normalize_text(text: str) -> str:
@@ -188,13 +195,44 @@ def process_table_column_content(col_elem, law_revision_id=None, image_dir=None)
     
     # 子要素を順次処理
     for child in col_elem:
+        # タグ名から名前空間を除去
         tag = child.tag
+        if '}' in tag:  # 名前空間がある場合
+            tag = tag.split('}', 1)[1]
         
         if tag == "Sentence":
-            # Sentence要素は改行区切りで使われることが多い
-            text = normalize_text(extract_text(child))
-            if text:
-                parts.append(text)
+            # Sentence要素内に図が含まれることもある
+            sentence_parts = []
+            has_fig = False
+            
+            # Sentence内のQuoteStructをチェック
+            for subchild in child:
+                # subchildのタグから名前空間を除去
+                subtag = subchild.tag
+                if '}' in subtag:
+                    subtag = subtag.split('}', 1)[1]
+                
+                if subtag == "QuoteStruct":
+                    # QuoteStruct内の図を処理
+                    quote_fig = subchild.find("Fig")
+                    if quote_fig is None:
+                        # 名前空間付きで検索
+                        quote_fig = subchild.find("{http://law.e-gov.go.jp/xmlschema/law}Fig")
+                    
+                    if quote_fig is not None:
+                        fig_text = process_fig(quote_fig, law_revision_id, image_dir, is_in_table=True)
+                        if fig_text:
+                            sentence_parts.append(fig_text.strip())
+                            has_fig = True
+            
+            # QuoteStructに図がない場合のみテキスト部分を抽出
+            if not has_fig:
+                text = normalize_text(extract_text(child))
+                if text:
+                    sentence_parts.append(text)
+            
+            if sentence_parts:
+                parts.append("<br>".join(sentence_parts))
         
         elif tag == "Column":
             # Column要素も改行として扱う
@@ -239,6 +277,18 @@ def process_table_column_content(col_elem, law_revision_id=None, image_dir=None)
                 fig_text = process_fig(fig, law_revision_id, image_dir, is_in_table=True)
                 if fig_text:
                     parts.append(fig_text.strip())
+        
+        elif tag == "QuoteStruct":
+            # 引用構造（QuoteStructの中に図が含まれることがある）
+            quote_fig = child.find("Fig")
+            if quote_fig is not None:
+                fig_text = process_fig(quote_fig, law_revision_id, image_dir, is_in_table=True)
+                if fig_text:
+                    parts.append(fig_text.strip())
+            # Fig以外の内容も処理
+            quote_text = normalize_text(extract_text(child))
+            if quote_text:
+                parts.append(quote_text)
         
         elif tag in ["Article", "Part", "Chapter", "Section", "Subsection", "Division"]:
             # これらの構造要素は稀だが、スキーマ上は可能
@@ -312,12 +362,17 @@ def process_remarks_in_table(remarks_elem):
     
     return "<br>".join(parts)
 
-def process_quote_struct(quote_elem):
-    """引用構造を処理（改行を維持）
+def process_quote_struct(quote_elem, law_revision_id=None, image_dir=None):
+    """引用構造を処理（改行を維持、図対応）
     
     QuoteStructは「図として捉える改正」などで使用され、
     改行が意味を持つ場合があります。normalize_textで改行を潰さず、
     preタグまたは引用記法で改行を保持します。
+    
+    Args:
+        quote_elem: QuoteStruct要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
     """
     if quote_elem is None:
         return ""
@@ -334,6 +389,11 @@ def process_quote_struct(quote_elem):
             text = extract_text(child).strip()
             if text:
                 content_parts.append(text)
+        elif child.tag == "Fig":
+            # 図を処理
+            fig_text = process_fig(child, law_revision_id, image_dir)
+            if fig_text:
+                content_parts.append(fig_text.strip())
         else:
             # その他の要素
             text = extract_text(child).strip()
@@ -514,7 +574,14 @@ def process_fig(fig, law_revision_id=None, image_dir=None, is_in_table=False):
         # テキストもない場合は最小出力
         return f"*[図]*\n\n"
 
-def process_fig_struct(fs):
+def process_fig_struct(fs, law_revision_id=None, image_dir=None):
+    """図構造要素を処理
+    
+    Args:
+        fs: FigStruct要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
+    """
     title = fs.find("FigStructTitle")
     t_text = normalize_text(extract_text(title)) if title is not None else ""
     md = f" **{t_text}** \n\n"
@@ -526,7 +593,7 @@ def process_fig_struct(fs):
             md += f"{remarks_text}\n\n"
     
     fig = fs.find("Fig")
-    if fig is not None: md += process_fig(fig)
+    if fig is not None: md += process_fig(fig, law_revision_id, image_dir)
     return md
 
 def _struct_common(elem, title_tag, mark):
@@ -585,17 +652,24 @@ def build_logical_table_grid(rows, law_revision_id=None, image_dir=None):
             for c_idx in range(max_cols):
                 if c_idx < len(grid[r_idx - 1]) and grid[r_idx - 1][c_idx]:
                     prev_cell = grid[r_idx - 1][c_idx]
-                    if prev_cell.get('remaining_rs', 1) > 1:
-                        # rowspan継続
-                        new_cell = {
-                            'text': '',  # 継続分はテキスト空
-                            'bt': prev_cell.get('bt', 'solid'),
-                            'bb': prev_cell.get('bb', 'solid'),
-                            'rs': prev_cell.get('rs', 1),
-                            'remaining_rs': prev_cell.get('remaining_rs', 1) - 1,
-                            'is_continuation': True
-                        }
-                        current_grid_row[c_idx] = new_cell
+                    # rowspan継続セルは、is_continuationまたはis_colspan_continuationがFalseのもののみ
+                    if (not prev_cell.get('is_continuation', False) and 
+                        not prev_cell.get('is_colspan_continuation', False) and
+                        prev_cell.get('remaining_rs', 1) > 1):
+                        # rowspan継続（colspan分も展開）
+                        prev_colspan = prev_cell.get('colspan', 1)
+                        for cs_offset in range(prev_colspan):
+                            if c_idx + cs_offset < max_cols:
+                                new_cell = {
+                                    'text': '',  # 継続分はテキスト空
+                                    'bt': prev_cell.get('bt', 'solid'),
+                                    'bb': prev_cell.get('bb', 'solid'),
+                                    'rs': prev_cell.get('rs', 1),
+                                    'remaining_rs': prev_cell.get('remaining_rs', 1) - 1,
+                                    'colspan': 1 if cs_offset > 0 else prev_colspan,
+                                    'is_continuation': True
+                                }
+                                current_grid_row[c_idx + cs_offset] = new_cell
         
         # 現在の行のセルをグリッドに配置
         grid_col_idx = 0
@@ -1175,13 +1249,19 @@ def process_appdx_format(elem, law_revision_id=None, image_dir=None):
     """別記書式を処理"""
     return _appdx_common(elem, law_revision_id, image_dir)
 
-def process_appdx_fig(elem): 
-    """別図を処理"""
+def process_appdx_fig(elem, law_revision_id=None, image_dir=None): 
+    """別図を処理
+    
+    Args:
+        elem: AppdxFig要素
+        law_revision_id: 法令履歴ID（画像ダウンロード用）
+        image_dir: 画像保存先ディレクトリ
+    """
     if elem is None: return ""
     # FigStructを処理
     fig_struct = elem.find("FigStruct")
     if fig_struct is not None:
-        return process_fig_struct(fig_struct)
+        return process_fig_struct(fig_struct, law_revision_id, image_dir)
     # FigStruct がない場合は相互参照を処理
     md = ""
     title = elem.find("AppdxFigTitle")
@@ -1575,15 +1655,31 @@ def extract_preamble(xml_root):
     return md + "\n"
 
 def extract_enact_statement(xml_root):
+    """制定文を抽出（内容がない場合は出力しない）"""
     enact = xml_root.find(".//EnactStatement")
     if enact is None: return ""
-    md = "## 制定文\n\n"
+    
+    # 制定文の内容を確認
+    content_parts = []
     for para in enact.findall("Paragraph"):
         sent = para.find(".//Sentence")
         if sent is not None:
-            md += f"{normalize_text(extract_text(sent))}\n\n"
+            text = normalize_text(extract_text(sent))
+            if text:
+                content_parts.append(text)
+    
     for sent in enact.findall("./Sentence"):
-        md += f"{normalize_text(extract_text(sent))}\n\n"
+        text = normalize_text(extract_text(sent))
+        if text:
+            content_parts.append(text)
+    
+    # 内容がない場合は空を返す
+    if not content_parts:
+        return ""
+    
+    md = "## 制定文\n\n"
+    for content in content_parts:
+        md += f"{content}\n\n"
     return md + "\n"
 
 def extract_toc(xml_root):
@@ -1707,7 +1803,7 @@ def process_all_appdx(parent_element, law_revision_id=None, image_dir=None):
     if appdx_figs:
         md += "# 別図\n\n"
         for appdx_fig in appdx_figs:
-            md += process_appdx_fig(appdx_fig)
+            md += process_appdx_fig(appdx_fig, law_revision_id, image_dir)
     
     appdxs = parent_element.findall("Appdx")
     if appdxs:
@@ -1873,13 +1969,16 @@ def extract_law_metadata(root, revision_meta=None):
                 md += "**略称**:\n"
                 for i, abbr in enumerate(abbrevs):
                     reading = kanas[i] if i < len(kanas) else ""
-                    if reading:
+                    # 読み仮名が1文字の場合は表示しない
+                    if reading and len(reading) > 1:
                         md += f"- {abbr} ({reading})\n"
                     else:
                         md += f"- {abbr}\n"
                 md += "\n"
             elif abbrev_kana:
-                md += f"**略称（読み）※頭文字のみの場合あり**: {abbrev_kana}\n\n"
+                # 読み仮名が1文字の場合は表示しない
+                if len(abbrev_kana) > 1:
+                    md += f"**略称（読み）※頭文字のみの場合あり**: {abbrev_kana}\n\n"
             
     return md
 
