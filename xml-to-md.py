@@ -12,14 +12,6 @@ from datetime import datetime
 # ==========================================
 # テーブル処理設定（グローバル）
 # ==========================================
-# TABLE_PROCESSING_MODE: "hybrid" または "strict"
-#   - "hybrid"  : Border属性からrowspanを自動推測（デフォルト）
-#   - "strict"  : rowspan属性のみ使用、Border属性は無視
-TABLE_PROCESSING_MODE = "hybrid"
-
-# ログ出力設定（トラブル診断用）
-TABLE_ROWSPAN_DEBUG = False
-
 # 画像処理設定
 DOWNLOAD_IMAGES = True  # 画像を自動ダウンロードするかどうか（False=直リンク）
 
@@ -752,7 +744,7 @@ def process_remarks(remarks_elem):
         if line_break:
             md += f"**{label_text}**\n\n"
         else:
-            md += f"**{label_text}**\n\n"
+            md += f"**{label_text}**\n"
     
     # 備考の項目
     for item in remarks_elem.findall("Item"):
@@ -761,7 +753,7 @@ def process_remarks(remarks_elem):
         item_sent = item.find("ItemSentence")
         if item_sent is not None:
             sent_text = normalize_text(extract_text(item_sent))
-            md += f"- {item_label}\n{sent_text}\n"
+            md += f"- {item_label}\n\n  {sent_text}\n"
     
     # 備考の文章
     for sentence in remarks_elem.findall("Sentence"):
@@ -982,7 +974,7 @@ def process_note_struct(ns, law_revision_id=None, image_dir=None):
 
 def process_format_struct(fs, law_revision_id=None, image_dir=None):
     return _struct_common(fs, "FormatStructTitle", "**", law_revision_id, image_dir)
-def process_class(cls): return _struct_common(cls, "ClassTitle", "### ")
+def process_class(cls, law_revision_id=None, image_dir=None): return _struct_common(cls, "ClassTitle", "### ", law_revision_id, image_dir)
 
 # ==========================================
 # テーブル処理のコアロジック (Grid System)
@@ -1085,64 +1077,6 @@ def build_logical_table_grid(body_rows, law_revision_id, image_dir):
         logical_rows.append(current_row_cells)
         
     return logical_rows
-
-
-def calculate_rowspan_from_border(table, row_idx, col_idx, body_rows, cell):
-    """
-    Border属性からrowspanを自動推測（ハイブリッドモード用）
-    
-    ロジック:
-    - 明示的なrowspan属性があれば使用
-    - なければBorderBottom="none"で内容ありのセルをチェック
-    - 次行から連続してBorderTop="none"で内容が空のセルが何個続くかカウント
-    - rowspan = 1 + (連続空セル数)
-    """
-    rowspan = int(cell.get('rowspan', 1))
-    
-    if rowspan > 1:
-        # 明示的指定あり → そのまま使用
-        if TABLE_ROWSPAN_DEBUG:
-            print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: rowspan={rowspan} (明示的指定)")
-        return rowspan
-    
-    # rowspan属性なし or rowspan=1の場合、Border属性をチェック
-    border_bottom = cell.get('BorderBottom', 'solid')
-    cell_text = normalize_text(extract_text(cell))
-    
-    if border_bottom == 'none' and cell_text:
-        # 次行以降をスキャン
-        extended_rowspan = 1
-        for next_row_idx in range(row_idx + 1, len(body_rows)):
-            next_row = body_rows[next_row_idx]
-            next_cols = next_row.findall('{*}TableColumn')
-            
-            if col_idx < len(next_cols):
-                next_cell = next_cols[col_idx]
-                next_border_top = next_cell.get('BorderTop', 'solid')
-                next_text = normalize_text(extract_text(next_cell))
-                
-                # BorderTop="none"で内容が空 → 継続してカウント
-                if next_border_top == 'none' and not next_text:
-                    extended_rowspan += 1
-                    if TABLE_ROWSPAN_DEBUG:
-                        print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: 次行{next_row_idx}も占有続行")
-                else:
-                    # パターン終了
-                    if TABLE_ROWSPAN_DEBUG:
-                        print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: Row {next_row_idx}で終了")
-                    break
-            else:
-                break
-        
-        if extended_rowspan > 1:
-            if TABLE_ROWSPAN_DEBUG:
-                print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: rowspan={extended_rowspan} (Border属性から推測)")
-            return extended_rowspan
-    
-    if TABLE_ROWSPAN_DEBUG and border_bottom == 'none' and not cell_text:
-        print(f"[calc_rowspan] Row {row_idx}, Col {col_idx}: rowspan=1 (空セル)")
-    
-    return rowspan
 
 
 def _check_table_has_non_solid_border(table, header, body_rows):
@@ -1477,7 +1411,7 @@ def process_child_elements(parent, indent, law_revision_id=None, image_dir=None)
     for ss in parent.findall("StyleStruct"): md += "\n" + process_style_struct(ss, law_revision_id, image_dir)
     for ns in parent.findall("NoteStruct"): md += "\n" + process_note_struct(ns, law_revision_id, image_dir)
     for fs in parent.findall("FormatStruct"): md += "\n" + process_format_struct(fs, law_revision_id, image_dir)
-    for cls in parent.findall("Class"): md += "\n" + process_class(cls)
+    for cls in parent.findall("Class"): md += "\n" + process_class(cls, law_revision_id, image_dir)
     # Column 要素（独立している場合）も処理
     for col in parent.findall("Column"):
         col_text = process_column(col)
@@ -2542,7 +2476,7 @@ def fetch_law_data(law_name, asof_date=None):
         return None, None, None
     except ET.ParseError:
         print("XMLの解析に失敗しました。")
-        return None, None
+        return None, None, None
 
 def load_xml_from_file(file_path):
     """XMLファイルを読み込む"""
@@ -2697,9 +2631,6 @@ def main():
     parser.add_argument("--law", help="法令名を指定してAPIから取得・変換します (確認なしで上書き)")
     parser.add_argument("--list", nargs="?", const="law_list.txt", help="法令リストファイルを指定して一括処理します (デフォルト: law_list.txt)")
     parser.add_argument("--asof", help="--law または --list 使用時に適用する法令の時点(YYYY-MM-DD)")
-    parser.add_argument("--table-mode", choices=["hybrid", "strict"], default="hybrid", 
-                        help="テーブル処理モード: hybrid(Border属性から推測) または strict(rowspan属性のみ) [デフォルト: hybrid]")
-    parser.add_argument("--table-debug", action="store_true", help="テーブルrowspan計算のデバッグログを出力")
     
     # 画像処理オプション（相互排他）
     image_group = parser.add_mutually_exclusive_group()
@@ -2712,9 +2643,7 @@ def main():
     args = parser.parse_args()
     
     # グローバル変数を引数から設定
-    global TABLE_PROCESSING_MODE, TABLE_ROWSPAN_DEBUG, DOWNLOAD_IMAGES, CONVERT_KANJI
-    TABLE_PROCESSING_MODE = args.table_mode
-    TABLE_ROWSPAN_DEBUG = args.table_debug
+    global DOWNLOAD_IMAGES, CONVERT_KANJI
     CONVERT_KANJI = args.convert_kanji
     
     # 画像処理設定（デフォルトはダウンロード）
@@ -2723,10 +2652,6 @@ def main():
     elif args.download_images:
         DOWNLOAD_IMAGES = True
     # それ以外（どちらも指定なし）はデフォルトのTrueを維持
-    
-    if TABLE_ROWSPAN_DEBUG:
-        print(f"[デバッグ] TABLE_PROCESSING_MODE={TABLE_PROCESSING_MODE}")
-        print(f"[デバッグ] TABLE_ROWSPAN_DEBUG=True")
     
     if not DOWNLOAD_IMAGES:
         print(f"[設定] 画像処理: e-Gov直リンクのみ（ダウンロードなし）")
