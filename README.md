@@ -86,7 +86,7 @@ python -m pip install requests
 引数なしでスクリプトを実行すると、対話形式で操作できます。
 
 ```bash
-python xml-to-md.py
+python xml_to_md.py
 ```
 
 #### モード1: 法令名を入力して検索（APIを使用）
@@ -142,33 +142,33 @@ python xml-to-md.py
 #### 1. 単一法令の取得・変換
 
 ```bash
-python xml-to-md.py --law 法令名 [--asof YYYY-MM-DD]
+python xml_to_md.py --law 法令名 [--asof YYYY-MM-DD]
 ```
 
 **例:**
 
 ```bash
 # 最新版の道路交通法を取得
-python xml-to-md.py --law 道路交通法
+python xml_to_md.py --law 道路交通法
 
 # 2025年6月1日時点の道路交通法を取得
-python xml-to-md.py --law 道路交通法 --asof 2025-06-01
+python xml_to_md.py --law 道路交通法 --asof 2025-06-01
 ```
 
 #### 2. リストファイルからの一括処理
 
 ```bash
-python xml-to-md.py --list [リストファイル名] [--asof YYYY-MM-DD]
+python xml_to_md.py --list [リストファイル名] [--asof YYYY-MM-DD]
 ```
 
 **例:**
 
 ```bash
 # law_list.txtから一括処理（最新版）
-python xml-to-md.py --list
+python xml_to_md.py --list
 
 # 2025年1月1日時点で一括処理
-python xml-to-md.py --list --asof 2025-01-01
+python xml_to_md.py --list --asof 2025-01-01
 ```
 
 **⚠️ 特徴**: 既存ファイルは**確認なしで自動上書き**されます（バッチ処理向け）
@@ -181,13 +181,13 @@ python xml-to-md.py --list --asof 2025-01-01
 #### 4. ヘルプの表示
 
 ```bash
-python xml-to-md.py --help
+python xml_to_md.py --help
 ```
 
 **出力例:**
 
 ```
-usage: xml-to-md.py [-h] [--law LAW] [--list [LIST]] [--asof ASOF]
+usage: xml_to_md.py [-h] [--law LAW] [--list [LIST]] [--asof ASOF]
                     [--download-images | --link-images] [--convert-kanji]
 
 Japanese Law XML to Markdown Converter
