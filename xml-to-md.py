@@ -1144,35 +1144,6 @@ def calculate_rowspan_from_border(table, row_idx, col_idx, body_rows, cell):
     
     return rowspan
 
-def _check_table_has_non_solid_border(table, header, body_rows):
-    """✨ NEW: テーブル内に solid 以外の border-style があるかを確認
-    
-    Args:
-        table: Table要素
-        header: TableHeaderRow要素（None可）
-        body_rows: TableRow要素のリスト
-    
-    Returns:
-        bool: True = solid以外あり（スタイル指定必要）、False = 全てsolid（スタイル指定不要）
-    """
-    # ヘッダーセルをチェック
-    if header is not None:
-        for col in header.findall("TableHeaderColumn"):
-            for border_attr in ["BorderTop", "BorderBottom", "BorderLeft", "BorderRight"]:
-                border_val = col.get(border_attr, "solid")
-                if border_val != "solid":
-                    return True
-    
-    # ボディセルをチェック
-    for row in body_rows:
-        for col in row.findall("TableColumn"):
-            for border_attr in ["BorderTop", "BorderBottom", "BorderLeft", "BorderRight"]:
-                border_val = col.get(border_attr, "solid")
-                if border_val != "solid":
-                    return True
-    
-    # 全て solid
-    return False
 
 def _check_table_has_non_solid_border(table, header, body_rows):
     """
@@ -2763,7 +2734,7 @@ def main():
     if CONVERT_KANJI:
         print(f"[設定] 漢数字変換: 有効（算用数字に変換）")
     else:
-        print(f"[設定] 画像処理: ダウンロードして埋め込み")
+        print(f"[設定] 漢数字変換: 無効")
 
     if args.law:
         process_from_api(args.law, force=True, asof_date=args.asof)

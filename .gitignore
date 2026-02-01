@@ -33,7 +33,7 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
-.idea/
+
 
 # ローカルテスト・デバッグファイル
 debug_output.txt
