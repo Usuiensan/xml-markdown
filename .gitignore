@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+# ローカルテスト・デバッグファイル
+debug_output.txt
+check_output.txt
+test_output/
+
+# ローカル設定ファイル
+lawapi-v2.yaml
+.env
+
+# ダウンロード済みXMLファイル（API取得分）
+*.xml
+!XMLSchemaForJapaneseLaw_v3.xsd
+!.github/
+
+# 生成されたMarkdown/画像出力
+output_Markdown/
+output/
+generated/
+
+# ローカルテストデータ
+*.test.xml
+test_data/
+temp/
+tmp/
