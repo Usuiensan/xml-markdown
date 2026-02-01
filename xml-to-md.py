@@ -612,7 +612,7 @@ def process_note_struct(ns): return _struct_common(ns, "NoteStructTitle", "")
 def process_format_struct(fs): return _struct_common(fs, "FormatStructTitle", "**")
 def process_class(cls): return _struct_common(cls, "ClassTitle", "### ")
 
-def build_logical_table_grid(rows, law_revision_id=None, image_dir=None):
+def build_logical_table_grid(rows, law_revision_id=None, image_dir=None, header_occupancy=None):
     """
     XMLの行データから論理グリッドを構築
     
@@ -622,6 +622,7 @@ def build_logical_table_grid(rows, law_revision_id=None, image_dir=None):
         rows: TableRow要素のリスト
         law_revision_id: 法令履歴ID（画像ダウンロード用）
         image_dir: 画像保存先ディレクトリ
+        header_occupancy: ヘッダー行からの継続占有マップ（オプション）
     
     Returns:
         grid: 二次元リスト、各要素は {'text': str, 'bt': str, 'bb': str, 'rs': int, 'remaining_rs': int}
@@ -646,6 +647,16 @@ def build_logical_table_grid(rows, law_revision_id=None, image_dir=None):
         
         # 現在の行のグリッドを初期化（前の行からのrowspanを考慮）
         current_grid_row = [None] * max_cols
+        
+        # ✨ NEW: ヘッダーからの継続占有を最初の行に適用
+        if r_idx == 0 and header_occupancy:
+            # DEBUG
+            print(f"[DEBUG] header_occupancy length: {len(header_occupancy)}, max_cols: {max_cols}")
+            print(f"[DEBUG] header_occupancy: {[bool(x) for x in header_occupancy]}")
+            for c_idx in range(min(len(header_occupancy), max_cols)):
+                if header_occupancy[c_idx]:
+                    current_grid_row[c_idx] = header_occupancy[c_idx]
+                    print(f"[DEBUG] Occupying column {c_idx} with rowspan continuation")
         
         # 前の行からの継続分を埋める（rowspan > 1）
         if r_idx > 0:
@@ -675,14 +686,24 @@ def build_logical_table_grid(rows, law_revision_id=None, image_dir=None):
         grid_col_idx = 0
         for col_idx, col in enumerate(cols):
             # 空きがある列を見つける
+            initial_grid_col_idx = grid_col_idx
             while grid_col_idx < max_cols and current_grid_row[grid_col_idx] is not None:
                 grid_col_idx += 1
             
-            if grid_col_idx < max_cols:
-                # ✨ 改善: TableColumn内の構造要素を処理（画像パラメータも渡す）
-                col_text = process_table_column_content(col, law_revision_id, image_dir)
-                rowspan = int(col.get('rowspan', 1))
-                colspan = int(col.get('colspan', 1))
+            # ✨ NEW: 占有列をスキップした場合、そのXMLセルは冗長なので無視
+            if grid_col_idx != initial_grid_col_idx:
+                # このXMLセルは rowspan で占有されている位置にあるため、スキップ
+                # ただし、grid_col_idxは既に次の空き列を指しているので、そのまま続行
+                continue
+            
+            if grid_col_idx >= max_cols:
+                # 列数オーバー
+                break
+            
+            # ✨ 改善: TableColumn内の構造要素を処理（画像パラメータも渡す）
+            col_text = process_table_column_content(col, law_revision_id, image_dir)
+            rowspan = int(col.get('rowspan', 1))
+            colspan = int(col.get('colspan', 1))
                 bt = col.get('BorderTop', 'solid')
                 bb = col.get('BorderBottom', 'solid')
                 
@@ -822,6 +843,8 @@ def render_table(table, indent, law_revision_id=None, image_dir=None):
         law_revision_id: 法令履歴ID（画像ダウンロード用）
         image_dir: 画像保存先ディレクトリ
     """
+    print(f"[DEBUG RENDER_TABLE] Called with indent={indent}")
+    
     indent_str = "  " * indent
     html_lines = []
     
@@ -835,29 +858,106 @@ def render_table(table, indent, law_revision_id=None, image_dir=None):
     header = table.find("TableHeaderRow")
     body_rows = list(table.findall("TableRow"))
     
+    print(f"[DEBUG RENDER_TABLE] header={header is not None}, body_rows count={len(body_rows)}")
+    
     # ✨ NEW: テーブル内の全セルをスキャンして、solid 以外の border-style があるかを確認
     has_non_solid_border = _check_table_has_non_solid_border(table, header, body_rows)
+    
+    # ✨ NEW: ヘッダー行からのrowspan継続を追跡
+    header_occupancy = None
     
     # ヘッダーセルの処理
     if header is not None:
         html_lines.append(f"{indent_str}  <thead>")
         html_lines.append(f"{indent_str}    <tr>")
-        for header_col in header.findall("TableHeaderColumn"):
+        
+        # ヘッダーのrowspan情報を収集
+        header_cols = header.findall("TableHeaderColumn")
+        max_header_cols = sum(int(col.get('colspan', 1)) for col in header_cols)
+        header_occupancy = [None] * max_header_cols
+        
+        col_idx = 0
+        for header_col in header_cols:
             # ヘッダーセルは構造が単純なので従来通り
             col_text = normalize_text(extract_text(header_col))
             attrs = get_cell_attributes(header_col, "th", enable_border_style=has_non_solid_border)
             html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
+            
+            # rowspan情報を記録
+            rowspan = int(header_col.get('rowspan', 1))
+            colspan = int(header_col.get('colspan', 1))
+            
+            if rowspan > 1:
+                # bodyに継続するrowspanを記録
+                for cs_offset in range(colspan):
+                    if col_idx + cs_offset < max_header_cols:
+                        header_occupancy[col_idx + cs_offset] = {
+                            'text': '',
+                            'bt': header_col.get('BorderTop', 'solid'),
+                            'bb': header_col.get('BorderBottom', 'solid'),
+                            'rs': rowspan,
+                            'remaining_rs': rowspan - 1,  # ヘッダー行を1つ消費済み
+                            'colspan': 1 if cs_offset > 0 else colspan,
+                            'is_continuation': True
+                        }
+            
+            col_idx += colspan
+        
         html_lines.append(f"{indent_str}    </tr>")
         html_lines.append(f"{indent_str}  </thead>")
     elif body_rows:
         # TableHeaderRowが存在しない場合、最初のTableRowをヘッダーとして使用
         html_lines.append(f"{indent_str}  <thead>")
         html_lines.append(f"{indent_str}    <tr>")
-        for col in body_rows[0].findall("TableColumn"):
-            # ✨ 改善: ヘッダーでも構造要素を処理（画像パラメータも渡す）
-            col_text = process_table_column_content(col, law_revision_id, image_dir)
-            attrs = get_cell_attributes(col, "th", enable_border_style=has_non_solid_border)
-            html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
+        
+        # ✨ NEW: ヘッダーのrowspan情報を収集（TableRowの場合）
+        header_cols = body_rows[0].findall("TableColumn")
+        print(f"[DEBUG HEADER] body_rows[0] tag: {body_rows[0].tag}")
+        print(f"[DEBUG HEADER] body_rows[0] children: {[child.tag for child in body_rows[0]]}")
+        max_header_cols = sum(int(col.get('colspan', 1)) for col in header_cols)
+        header_occupancy = [None] * max_header_cols
+        
+        print(f"[DEBUG HEADER] max_header_cols: {max_header_cols}, number of columns: {len(header_cols)}")
+        
+        col_idx = 0
+        for i, col in enumerate(header_cols):
+            try:
+                # ✨ 改善: ヘッダーでも構造要素を処理（画像パラメータも渡す）
+                col_text = process_table_column_content(col, law_revision_id, image_dir)
+                attrs = get_cell_attributes(col, "th", enable_border_style=has_non_solid_border)
+                html_lines.append(f'{indent_str}      <th{attrs}>{col_text}</th>')
+                
+                # ✨ NEW: rowspan情報を記録
+                rowspan = int(col.get('rowspan', 1))
+                colspan = int(col.get('colspan', 1))
+                
+                print(f"[DEBUG HEADER] cell#{i}: col_idx={col_idx}, rowspan={rowspan}, colspan={colspan}, text='{col_text[:30] if col_text else ''}'")
+                
+                if rowspan > 1:
+                    # bodyに継続するrowspanを記録
+                    for cs_offset in range(colspan):
+                        if col_idx + cs_offset < max_header_cols:
+                            print(f"[DEBUG HEADER] Setting header_occupancy[{col_idx + cs_offset}] = continuation")
+                            header_occupancy[col_idx + cs_offset] = {
+                                'text': '',
+                                'bt': col.get('BorderTop', 'solid'),
+                                'bb': col.get('BorderBottom', 'solid'),
+                                'rs': rowspan,
+                                'remaining_rs': rowspan - 1,  # ヘッダー行を1つ消費済み
+                                'colspan': 1 if cs_offset > 0 else colspan,
+                                'is_continuation': True
+                            }
+                
+                col_idx += colspan
+            except Exception as e:
+                print(f"[ERROR HEADER] cell#{i}: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+        
+        print(f"[DEBUG HEADER] Total cells processed: {len(header_cols)}, final col_idx: {col_idx}")
+        print(f"[DEBUG HEADER] header_occupancy: {[bool(x) for x in header_occupancy]}")
+        
         html_lines.append(f"{indent_str}    </tr>")
         html_lines.append(f"{indent_str}  </thead>")
         body_rows = body_rows[1:]  # ヘッダーとして使用した行を除外
@@ -865,7 +965,8 @@ def render_table(table, indent, law_revision_id=None, image_dir=None):
     # ボディ行処理（グリッドベース）
     if body_rows:
         # 論理グリッドを構築（画像パラメータも渡す）
-        grid = build_logical_table_grid(body_rows, law_revision_id, image_dir)
+        # ✨ NEW: ヘッダーからのrowspan継続情報も渡す
+        grid = build_logical_table_grid(body_rows, law_revision_id, image_dir, header_occupancy)
         
         if grid:
             html_lines.append(f"{indent_str}  <tbody>")
@@ -1024,6 +1125,7 @@ def render_table_struct(ts, indent, law_revision_id=None, image_dir=None):
     
     tbl = ts.find("Table")
     if tbl is not None:
+        print(f"[DEBUG TABLE_STRUCT] Calling render_table with indent={indent + 1}")
         html += render_table(tbl, indent + 1, law_revision_id, image_dir)
     if title is not None:
         html += f"{indent_str}</div>\n\n"
@@ -1208,8 +1310,25 @@ def process_appdx_table(elem, law_revision_id=None, image_dir=None):
     md = ""
     # AppdxTableTitleを処理
     title = elem.find("AppdxTableTitle")
+    table_title_text = ""
     if title is not None:
-        md += f"## {normalize_text(extract_text(title))}\n\n"
+        table_title_text = normalize_text(extract_text(title))
+        md += f"## {table_title_text}\n\n"
+        print(f"[DEBUG TABLE] Processing table: {table_title_text}")
+        
+        # 別表第一の場合、詳細情報を表示
+        if "別表第一" in table_title_text and table_title_text == "別表第一":
+            ts = elem.find("TableStruct")
+            if ts:
+                tbl = ts.find("Table")
+                if tbl:
+                    rows = tbl.findall("TableRow")
+                    print(f"[DEBUG 別表第一] Total TableRows: {len(rows)}")
+                    if rows:
+                        first_row_cols = rows[0].findall("TableColumn")
+                        print(f"[DEBUG 別表第一] First row TableColumns: {len(first_row_cols)}")
+                        for i, col in enumerate(first_row_cols):
+                            print(f"[DEBUG 別表第一] Col {i}: rowspan={col.get('rowspan', '1')}, colspan={col.get('colspan', '1')}")
     
     # RelatedArticleNum（関係条文番号）を処理
     for rel_art in elem.findall("RelatedArticleNum"):
